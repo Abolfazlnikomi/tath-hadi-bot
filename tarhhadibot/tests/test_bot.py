@@ -10,7 +10,7 @@ from schoolbot import excel
 from schoolbot.api import BaleError
 from schoolbot.config import Config
 from schoolbot.models import (
-    Attendance, Base, Classroom, Conversation, Discount, Enrollment, Inbox, Outbox, Student, utcnow,
+    Attendance, Base, Classroom, Conversation, Discount, Enrollment, Inbox, Outbox, Setting, Student, utcnow,
 )
 from schoolbot.runtime import Runner
 from schoolbot.service import apply_import
@@ -105,6 +105,59 @@ class BotTests(unittest.TestCase):
             student = session.get(Student, self.student_id)
             self.assertEqual(student.chat_id, 25)
         self.assertIn("خوش آمدید", self.latest_text())
+
+    def test_feature_settings_are_admin_only_and_persistent(self):
+        self.callback("feature:discounts:0", user=25)
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "feature:discounts"))
+        self.callback("feature:discounts:0")
+        with self.sessions() as session:
+            self.assertEqual(session.get(Setting, "feature:discounts").value, "0")
+        self.message("0012345678")
+        with self.sessions() as session:
+            item = session.scalars(select(Outbox).where(Outbox.method == "sendMessage").order_by(Outbox.id.desc())).first()
+            self.assertNotIn("🎁 تخفیف‌های من", str(item.payload["reply_markup"]))
+        self.message("🎁 تخفیف‌های من")
+        self.assertIn("غیرفعال", self.latest_text())
+        self.callback("feature:discounts:1")
+        self.message("🎁 تخفیف‌های من")
+        self.assertIn("تخفیفی برای شما ثبت نشده", self.latest_text())
+
+    def test_disabled_features_block_old_class_buttons_and_hide_menu(self):
+        self.callback("feature:attendance:0")
+        self.callback(f"attend:{self.class_id}")
+        self.assertIn("غیرفعال", self.latest_text())
+        self.callback(f"upload:attendance:{self.class_id}")
+        self.assertIn("غیرفعال", self.latest_text())
+        self.callback(f"class:{self.class_id}")
+        with self.sessions() as session:
+            item = session.scalars(select(Outbox).where(Outbox.method == "sendMessage").order_by(Outbox.id.desc())).first()
+            self.assertNotIn("attendance", str(item.payload["reply_markup"]))
+            self.assertNotIn("attend:", str(item.payload["reply_markup"]))
+
+    def test_excel_can_be_disabled_without_disabling_manual_attendance(self):
+        self.callback("feature:excel:0")
+        self.callback(f"export:attendance:{self.class_id}")
+        self.assertIn("غیرفعال", self.latest_text())
+        self.callback(f"attend:{self.class_id}")
+        with self.sessions() as session:
+            nonce = session.get(Conversation, self.config.admin_id).data["nonce"]
+        self.callback(f"mark:{nonce}:{self.student_id}:present")
+        self.callback(f"confirm:{nonce}")
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Attendance)), 1)
+
+    def test_disabled_feature_blocks_pending_confirmation(self):
+        self.callback(f"attend:{self.class_id}")
+        with self.sessions() as session:
+            nonce = session.get(Conversation, self.config.admin_id).data["nonce"]
+        self.callback(f"mark:{nonce}:{self.student_id}:present")
+        with self.sessions.begin() as session:
+            session.add(Setting(key="feature:manual_attendance", value="0"))
+        self.callback(f"confirm:{nonce}")
+        self.assertIn("غیرفعال", self.latest_text())
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Attendance)), 0)
 
     def test_unknown_student_exact_error(self):
         self.message("9999999999")

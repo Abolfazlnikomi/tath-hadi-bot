@@ -103,6 +103,48 @@ class APITests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.api.download({"file_name": "test.xlsx", "file_id": "id"})
 
+    def test_download_accepts_bale_absolute_url_and_colon_path(self):
+        paths = [
+            "https://tapi.bale.ai/file/botsecret-test-token/files/test.xlsx?signature=abc",
+            "files/123:456.xlsx",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                def handle(request):
+                    if "getFile" in request.url.path:
+                        return httpx.Response(200, json={"ok": True, "result": {"file_path": path}})
+                    expected = path if path.startswith("https://") else (
+                        "https://tapi.bale.ai/file/botsecret-test-token/files/123%3A456.xlsx"
+                    )
+                    self.assertEqual(str(request.url), expected)
+                    return httpx.Response(200, content=b"excel")
+
+                self.transport(handle)
+                self.assertEqual(self.api.download({"file_name": "test.xlsx", "file_id": "id"}), b"excel")
+                self.api.client.close()
+
+    def test_download_rejects_unsafe_and_malformed_paths(self):
+        for path in (None, [], "", "//evil.invalid/file", "https://tapi.bale.ai.evil.invalid/file",
+                     "https://user@tapi.bale.ai/file", "https://tapi.bale.ai:444/file",
+                     "http://tapi.bale.ai/file", "files/../secret", "files/%2e%2e/secret",
+                     "files\\secret", "files/\nsecret"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                self.api.download_url(path)
+
+    def test_download_does_not_follow_redirects(self):
+        requests = []
+
+        def handle(request):
+            requests.append(request)
+            if "getFile" in request.url.path:
+                return httpx.Response(200, json={"ok": True, "result": {"file_path": "files/test.xlsx"}})
+            return httpx.Response(302, headers={"Location": "https://evil.invalid/file"})
+
+        self.transport(handle)
+        with self.assertRaises(BaleError):
+            self.api.download({"file_name": "test.xlsx", "file_id": "id"})
+        self.assertEqual(len(requests), 2)
+
     def test_download_rejects_extension_and_size_before_request(self):
         for document in ({"file_name": "test.xls"}, {"file_name": "test.xlsx", "file_size": 999999999}):
             with self.assertRaises(ValueError):

@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 
 from . import excel
 from .api import BaleError
+from .features import FEATURES, TEXT_FEATURES, callback_features, enabled, state_features
 from .models import (
     Attendance, Audit, Classroom, Conversation, Discount, Enrollment, LoginThrottle, Outbox, Setting, Student, utcnow,
 )
@@ -17,6 +18,7 @@ ADMIN_MENU = [
     ["🏫 کلاس‌ها", "➕ ایجاد کلاس"],
     ["📢 پیام همگانی", "⚙️ تنظیم راه‌های ارتباطی"],
     ["📊 وضعیت ارسال‌ها", "👤 مدیریت دانش‌آموز"],
+    ["⚙️ امکانات بات"],
     ["☎️ راه‌های ارتباطی", "لغو"],
 ]
 
@@ -60,7 +62,31 @@ class Bot:
         session.add(Audit(actor_id=user_id, action=action, details=details))
 
     def home(self, session, chat_id, admin):
-        self.say(session, chat_id, "گزینه موردنظر را انتخاب کنید.", reply(admin))
+        self.say(session, chat_id, "گزینه موردنظر را انتخاب کنید.", self.menu(session, admin))
+
+    def menu(self, session, admin=False):
+        markup = reply(admin)
+        markup["keyboard"] = [
+            [button for button in row if enabled(session, TEXT_FEATURES.get(button["text"], ""))]
+            for row in markup["keyboard"]
+        ]
+        markup["keyboard"] = [row for row in markup["keyboard"] if row]
+        if not markup["keyboard"]:
+            return {"remove_keyboard": True}
+        return markup
+
+    def allow(self, session, chat_id, features):
+        if any(not enabled(session, feature) for feature in features):
+            self.say(session, chat_id, "این امکان در حال حاضر توسط مدیر غیرفعال شده است.")
+            return False
+        return True
+
+    def feature_menu(self, session, chat_id):
+        self.say(session, chat_id, "برای فعال یا غیرفعال کردن هر امکان، دکمه آن را بزنید.", inline([
+            [(f"{'✅ فعال' if enabled(session, key) else '⛔ غیرفعال'} | {title}",
+              f"feature:{key}:{0 if enabled(session, key) else 1}")]
+            for key, title in FEATURES.items()
+        ]))
 
     def handle(self, session, update):
         callback = update.get("callback_query")
@@ -90,6 +116,8 @@ class Bot:
             self.callback(session, chat_id, user_id, state, callback.get("data", ""))
             return
         text = message.get("text", "").strip()
+        if text in TEXT_FEATURES and not self.allow(session, chat_id, [TEXT_FEATURES[text]]):
+            return
         if text in ("/start", "/cancel", "لغو", "منوی اصلی"):
             self.set_state(state)
             if admin:
@@ -137,7 +165,7 @@ class Bot:
             student.chat_id = chat_id
             session.delete(throttle)
             self.audit(session, user_id, "student_login", student_id=student.id)
-            self.say(session, chat_id, f"{student.full_name} عزیز، خوش آمدید.", reply())
+            self.say(session, chat_id, f"{student.full_name} عزیز، خوش آمدید.", self.menu(session))
         elif text == "📋 حضور و غیاب من":
             records = session.execute(select(Attendance, Classroom.title).join(
                 Classroom, Classroom.id == Attendance.classroom_id,
@@ -179,7 +207,7 @@ class Bot:
     def class_menu(self, session, chat_id, classroom):
         count = session.scalar(select(func.count()).select_from(Enrollment).where(Enrollment.classroom_id == classroom.id))
         identifier = classroom.id
-        self.say(session, chat_id, f"کلاس: {classroom.title}\nتعداد اعضا: {count}", inline([
+        rows = [
             [("ویرایش نام کلاس", f"rename:{identifier}")],
             [("نمونه کاربران", f"template:students:{identifier}"), ("لیست فعلی", f"export:students:{identifier}")],
             [("بارگذاری کاربران", f"upload:students:{identifier}")],
@@ -190,9 +218,16 @@ class Bot:
             [("بارگذاری تخفیف‌ها", f"upload:discounts:{identifier}")],
             [("ارسال پیام به کلاس", f"broadcast:{identifier}")],
             [("حذف عضویت دانش‌آموز", f"remove:{identifier}")],
-        ]))
+        ]
+        rows = [[(title, data) for title, data in row
+                 if all(enabled(session, feature) for feature in callback_features(data))] for row in rows]
+        self.say(session, chat_id, f"کلاس: {classroom.title}\nتعداد اعضا: {count}", inline([row for row in rows if row]))
 
     def admin_message(self, session, chat_id, user_id, state, message, text):
+        if text == "⚙️ امکانات بات":
+            self.set_state(state)
+            self.feature_menu(session, chat_id)
+            return
         if text == "🏫 کلاس‌ها":
             self.set_state(state)
             self.classes(session, chat_id)
@@ -223,6 +258,9 @@ class Bot:
                      inline([[("تلاش مجدد ناموفق‌ها", "retry_failed")]]))
             return
         mode = state.data.get("mode")
+        if not self.allow(session, chat_id, state_features(state.data)):
+            self.set_state(state)
+            return
         if mode in ("create", "rename"):
             if not text or len(text) > 200:
                 self.say(session, chat_id, "نام کلاس باید بین ۱ تا ۲۰۰ کاراکتر باشد.")
@@ -270,7 +308,7 @@ class Bot:
                 self.say(session, chat_id, f"فایل ثبت نشد: {error}")
                 return
             nonce = secrets.token_hex(8)
-            self.set_state(state, mode="confirm_import", nonce=nonce, pending=pending)
+            self.set_state(state, mode="confirm_import", nonce=nonce, pending=pending, source="excel")
             preview = f"تعداد ردیف معتبر: {len(pending['rows'])}\n"
             if pending["kind"] == "attendance":
                 import jdatetime
@@ -319,7 +357,7 @@ class Bot:
                              [("قطع اتصال حساب بله", f"unlink:{student.id}")],
                          ]))
         else:
-            self.say(session, chat_id, "از منو گزینه‌ای انتخاب کنید یا «لغو» بفرستید.", reply(True))
+            self.say(session, chat_id, "از منو گزینه‌ای انتخاب کنید یا «لغو» بفرستید.", self.menu(session, True))
 
     def recipients(self, session, classroom_id):
         statement = select(Student.chat_id).where(Student.active.is_(True), Student.chat_id.is_not(None))
@@ -330,6 +368,27 @@ class Bot:
     def callback(self, session, chat_id, user_id, state, data):
         parts = data.split(":")
         action = parts[0]
+        if action == "feature":
+            if len(parts) != 3 or parts[1] not in FEATURES or parts[2] not in ("0", "1"):
+                return
+            key = "feature:" + parts[1]
+            setting = session.get(Setting, key)
+            if setting is None:
+                session.add(Setting(key=key, value=parts[2]))
+            else:
+                setting.value = parts[2]
+            self.audit(session, user_id, "update_feature", feature=parts[1], enabled=parts[2] == "1")
+            self.set_state(state)
+            session.flush()
+            self.feature_menu(session, chat_id)
+            self.home(session, chat_id, True)
+            return
+        required = callback_features(data)
+        if action in ("confirm", "mark"):
+            required += state_features(state.data)
+        if not self.allow(session, chat_id, required):
+            self.set_state(state)
+            return
         if action == "mark":
             if (len(parts) != 4 or state.data.get("mode") != "attendance"
                     or parts[1] != state.data.get("nonce") or not parts[2].isdigit()
@@ -468,7 +527,7 @@ class Bot:
                        {"national_id": item.national_id, "name": item.full_name, "status": statuses[str(item.id)]}
                        for item in roster]}
         present = sum(row["status"] == "حاضر" for row in pending["rows"])
-        self.set_state(state, mode="confirm_import", pending=pending, nonce=nonce)
+        self.set_state(state, mode="confirm_import", pending=pending, nonce=nonce, source="manual_attendance")
         self.say(session, chat_id, f"حاضر: {present} | غایب: {len(roster) - present}\nثبت و ارسال اعلان داخل بات تأیید شود؟",
                  inline([[("تأیید ثبت", f"confirm:{nonce}"), ("لغو", "cancel")]]))
 

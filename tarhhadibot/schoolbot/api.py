@@ -1,7 +1,7 @@
 import base64
 import json
 import time
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -65,10 +65,8 @@ class BaleAPI:
         if not document.get("file_name", "").lower().endswith(".xlsx"):
             raise ValueError("فقط فایل xlsx مجاز است.")
         info = self.call("getFile", {"file_id": document["file_id"]})
-        path = info.get("file_path", "")
-        if not path or ":" in path or ".." in path.split("/"):
-            raise ValueError("مسیر دانلود فایل معتبر نیست.")
-        url = f"https://tapi.bale.ai/file/bot{self.config.token}/{quote(path.lstrip('/'), safe='/')}"
+        path = info.get("file_path", "") if isinstance(info, dict) else ""
+        url = self.download_url(path)
         try:
             with self.client.stream("GET", url) as response:
                 if response.status_code != 200:
@@ -81,3 +79,29 @@ class BaleAPI:
                 return bytes(content)
         except httpx.HTTPError:
             raise BaleError(503) from None
+
+    def download_url(self, path):
+        if not isinstance(path, str) or not path or any(character.isspace() for character in path):
+            raise ValueError("مسیر دانلود فایل معتبر نیست.")
+        try:
+            parsed = urlsplit(path)
+            absolute = path.lower().startswith("https://")
+            if absolute:
+                if (parsed.hostname != "tapi.bale.ai" or parsed.port not in (None, 443)
+                        or parsed.username is not None or parsed.password is not None or parsed.fragment):
+                    raise ValueError
+                decoded = unquote(parsed.path)
+            else:
+                if path.startswith("//"):
+                    raise ValueError
+                decoded = unquote(path)
+            if ("\\" in decoded or ".." in decoded.split("/")
+                    or any(ord(character) < 32 for character in decoded)):
+                raise ValueError
+            if absolute:
+                return path
+            if "://" in path or "?" in path or "#" in path:
+                raise ValueError
+            return f"https://tapi.bale.ai/file/bot{self.config.token}/{quote(path.lstrip('/'), safe='/')}"
+        except ValueError:
+            raise ValueError("مسیر دانلود فایل معتبر نیست.") from None
