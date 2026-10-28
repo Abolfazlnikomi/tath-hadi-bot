@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bale_school
+      POSTGRES_USER: bale
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bale -d bale_school"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_TARGET: default
+      DATABASE_URL: postgresql+psycopg://bale:${POSTGRES_PASSWORD}@db:5432/bale_school
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 60s
+volumes:
+  postgres_data:
