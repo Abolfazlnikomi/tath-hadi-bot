@@ -88,6 +88,34 @@ class BotTests(unittest.TestCase):
             items = list(session.scalars(select(Outbox).where(Outbox.method == "sendMessage").order_by(Outbox.id)))
             return items[-1].payload["text"]
 
+    def last_payload_for(self, chat_id):
+        with self.sessions() as session:
+            messages = session.scalars(select(Outbox).where(Outbox.method == "sendMessage").order_by(Outbox.id.desc()))
+            return next(item.payload for item in messages if item.payload["chat_id"] == chat_id)
+
+    def button_texts(self, payload):
+        markup = payload["reply_markup"]
+        return [button["text"] for row in markup.get("keyboard", markup.get("inline_keyboard", [])) for button in row]
+
+    def current_nonce(self, user=None):
+        with self.sessions() as session:
+            return session.get(Conversation, self.config.admin_id if user is None else user).data["nonce"]
+
+    def add_admin(self, user=26):
+        self.callback("admin_add")
+        self.message(str(user), user=self.config.admin_id)
+        self.callback("confirm:" + self.current_nonce())
+
+    def create_record(self, code, description, user=None):
+        user = self.config.admin_id if user is None else user
+        self.callback(f"record:{self.class_id}", user=user)
+        self.message("0012345678", user=user)
+        self.message(code, user=user)
+        self.message(description, user=user)
+        nonce = self.current_nonce(user)
+        self.callback("confirm:" + nonce, user=user)
+        return nonce
+
     def pending(self, kind="attendance", status="حاضر"):
         row = {"national_id": "0012345678", "name": "دانش آموز"}
         if kind == "attendance":
@@ -116,7 +144,7 @@ class BotTests(unittest.TestCase):
         self.message("0012345678")
         with self.sessions() as session:
             item = session.scalars(select(Outbox).where(Outbox.method == "sendMessage").order_by(Outbox.id.desc())).first()
-            self.assertNotIn("🎁 تخفیف‌های من", str(item.payload["reply_markup"]))
+            self.assertNotIn("🎁 تخفیف‌های من", self.button_texts(item.payload))
         self.message("🎁 تخفیف‌های من")
         self.assertIn("غیرفعال", self.latest_text())
         self.callback("feature:discounts:1")
@@ -158,6 +186,203 @@ class BotTests(unittest.TestCase):
         self.assertIn("غیرفعال", self.latest_text())
         with self.sessions() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(Attendance)), 0)
+
+    def test_owner_adds_admin_with_confirmation_and_persian_id(self):
+        self.message("👥 مدیریت ادمین‌ها", user=self.config.admin_id)
+        self.callback("admin_add")
+        self.message("۲۶", user=self.config.admin_id)
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "admin:26"))
+        nonce = self.current_nonce()
+        self.callback("confirm:" + nonce)
+        with self.sessions() as session:
+            self.assertEqual(session.get(Setting, "admin:26").value, "1")
+        self.message("/start", user=26)
+        payload = self.last_payload_for(26)
+        self.assertIn("🏫 کلاس‌ها", self.button_texts(payload))
+        self.assertNotIn("👥 مدیریت ادمین‌ها", self.button_texts(payload))
+        self.message("➕ ایجاد کلاس", user=26)
+        self.message("کلاس ادمین دوم", user=26)
+        with self.sessions() as session:
+            self.assertIsNotNone(session.scalar(select(Classroom).where(Classroom.title == "کلاس ادمین دوم")))
+            self.assertEqual(session.get(Setting, "admin_chat_id").value, str(self.config.admin_id))
+
+    def test_added_admin_cannot_manage_admins(self):
+        self.add_admin()
+        for data in ("admin_add", "admins:0", f"admin_remove:{self.config.admin_id}", "admin_remove:26"):
+            self.callback(data, user=26)
+            self.assertIn("فقط مدیر اصلی", self.latest_text())
+        self.message("👥 مدیریت ادمین‌ها", user=26)
+        self.assertIn("فقط مدیر اصلی", self.latest_text())
+        with self.sessions.begin() as session:
+            state = session.get(Conversation, 26)
+            self.runner.bot.set_state(state, mode="confirm_admin", operation="add", admin_id=27, nonce="forged")
+        self.callback("confirm:forged", user=26)
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "admin:27"))
+
+    def test_student_cannot_add_admin(self):
+        self.callback("admin_add", user=25)
+        self.assertIn("دسترسی مجاز نیست", self.latest_text())
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "admin:25"))
+
+    def test_remove_admin_revokes_pending_operations_immediately(self):
+        self.add_admin()
+        self.callback(f"attend:{self.class_id}", user=26)
+        attendance_nonce = self.current_nonce(26)
+        self.callback(f"mark:{attendance_nonce}:{self.student_id}:present", user=26)
+        self.callback("admin_remove:26")
+        with self.sessions() as session:
+            self.assertIsNotNone(session.get(Setting, "admin:26"))
+        self.callback("confirm:" + self.current_nonce())
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "admin:26"))
+            self.assertEqual(session.get(Conversation, 26).data, {})
+        self.assertEqual(self.last_payload_for(26)["reply_markup"], {"remove_keyboard": True})
+        self.callback("confirm:" + attendance_nonce, user=26)
+        self.assertIn("دسترسی مجاز نیست", self.latest_text())
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Attendance)), 0)
+
+    def test_owner_cannot_be_removed_and_admin_ids_are_validated(self):
+        self.callback(f"admin_remove:{self.config.admin_id}")
+        self.assertIn("قابل حذف نیست", self.latest_text())
+        self.callback("admin_add")
+        for identifier in ("@someone", "0", "-2", "9223372036854775808", "²"):
+            self.message(identifier, user=self.config.admin_id)
+            self.assertIn("شناسه عددی مثبت", self.latest_text())
+        self.message(str(self.config.admin_id), user=self.config.admin_id)
+        self.assertIn("از قبل ادمین", self.latest_text())
+
+    def test_cancel_admin_add_and_replay_confirmation(self):
+        self.callback("admin_add")
+        self.message("26", user=self.config.admin_id)
+        nonce = self.current_nonce()
+        self.callback("cancel")
+        self.callback("confirm:" + nonce)
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "admin:26"))
+        self.add_admin()
+        self.message("/start", user=26)
+        self.assertIn("🏫 کلاس‌ها", self.button_texts(self.last_payload_for(26)))
+
+    def test_id_command_does_not_require_login(self):
+        self.message("/id", user=26)
+        self.assertEqual(self.latest_text(), "شناسه عددی حساب شما: 26")
+
+    def test_disabling_feature_refreshes_existing_student_keyboard(self):
+        self.message("0012345678")
+        self.callback("feature:discounts:0")
+        self.assertNotIn("🎁 تخفیف‌های من", self.button_texts(self.last_payload_for(25)))
+        self.callback("feature:attendance:0")
+        self.callback("feature:contacts:0")
+        self.assertEqual(self.last_payload_for(25)["reply_markup"], {"remove_keyboard": True})
+        self.message("🎁 تخفیف‌های من")
+        self.assertEqual(self.last_payload_for(25)["reply_markup"], {"remove_keyboard": True})
+        self.callback("feature:discounts:1")
+        self.assertIn("🎁 تخفیف‌های من", self.button_texts(self.last_payload_for(25)))
+
+    def test_rename_records_section_keeps_existing_data_and_refreshes_menu(self):
+        self.message("0012345678")
+        with self.sessions.begin() as session:
+            apply_import(session, self.pending("discounts"))
+        self.message("🎁 نام بخش تخفیف/رکوردها", user=self.config.admin_id)
+        self.message("نتایج و دوره‌ها", user=self.config.admin_id)
+        payload = self.last_payload_for(25)
+        self.assertIn("🎁 نتایج و دوره‌ها", self.button_texts(payload))
+        self.assertNotIn("🎁 تخفیف‌های من", self.button_texts(payload))
+        self.callback(f"class:{self.class_id}")
+        self.assertIn("ثبت رکورد در نتایج و دوره‌ها", self.button_texts(self.last_payload_for(self.config.admin_id)))
+        self.message("🎁 نتایج و دوره‌ها")
+        self.assertIn("OFF-20", self.latest_text())
+        self.assertIn("نتایج و دوره‌ها", self.latest_text())
+        self.callback("feature:discounts:0")
+        self.assertNotIn("🎁 نتایج و دوره‌ها", self.button_texts(self.last_payload_for(25)))
+        self.message("🎁 نتایج و دوره‌ها")
+        self.assertIn("غیرفعال", self.latest_text())
+        self.assertNotIn("OFF-20", self.latest_text())
+
+    def test_records_title_validation(self):
+        self.message("🎁 نام بخش تخفیف/رکوردها", user=self.config.admin_id)
+        for title in ("", "الف\nب", "الف" * 61):
+            self.message(title, user=self.config.admin_id)
+            self.assertIn("بین ۱ تا ۶۰", self.latest_text())
+        with self.sessions() as session:
+            self.assertIsNone(session.get(Setting, "discounts_title"))
+
+    def test_manual_records_support_multiple_titles_same_value_and_updates(self):
+        self.callback("feature:excel:0")
+        self.create_record("نمره ریاضی", "۲۰")
+        nonce = self.create_record("نمره فیزیک", "۲۰")
+        self.callback("confirm:" + nonce)
+        self.assertIn("منقضی", self.latest_text())
+        self.create_record("نمره ریاضی", "۱۹")
+        with self.sessions() as session:
+            rows = list(session.scalars(select(Discount).order_by(Discount.id)))
+            self.assertEqual([(item.code, item.description) for item in rows], [("نمره ریاضی", "۱۹"), ("نمره فیزیک", "۲۰")])
+        self.message("0012345678")
+        self.message("🎁 تخفیف‌های من")
+        self.assertIn("نمره ریاضی", self.latest_text())
+        self.assertIn("نمره فیزیک", self.latest_text())
+        self.message("🎁 تخفیف‌های من", user=26)
+        self.assertNotIn("نمره ریاضی", self.latest_text())
+
+    def test_manual_record_requires_confirmation_and_supports_empty_description(self):
+        self.callback(f"record:{self.class_id}")
+        self.message("0012345678", user=self.config.admin_id)
+        self.message("OFF-10", user=self.config.admin_id)
+        self.message("-", user=self.config.admin_id)
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Discount)), 0)
+        self.callback("confirm:" + self.current_nonce())
+        with self.sessions() as session:
+            record = session.scalar(select(Discount))
+            self.assertEqual((record.code, record.description), ("OFF-10", ""))
+
+    def test_record_rejects_nonmembers_and_invalid_values(self):
+        self.callback(f"record:{self.class_id}")
+        self.message("9999999999", user=self.config.admin_id)
+        self.assertIn("عضو فعال", self.latest_text())
+        self.message("0012345678", user=self.config.admin_id)
+        self.message("x" * 201, user=self.config.admin_id)
+        self.assertIn("بین ۱ تا ۲۰۰", self.latest_text())
+        self.message("OFF-10", user=self.config.admin_id)
+        self.message("x" * 2001, user=self.config.admin_id)
+        self.assertIn("بین ۱ تا ۲۰۰۰", self.latest_text())
+
+    def test_record_revalidates_membership_and_feature_on_confirmation(self):
+        self.callback(f"record:{self.class_id}")
+        self.message("0012345678", user=self.config.admin_id)
+        self.message("OFF-10", user=self.config.admin_id)
+        self.message("دوره", user=self.config.admin_id)
+        nonce = self.current_nonce()
+        with self.sessions.begin() as session:
+            session.get(Student, self.student_id).active = False
+        self.callback("confirm:" + nonce)
+        self.assertIn("عضو فعال", self.latest_text())
+        with self.sessions.begin() as session:
+            session.get(Student, self.student_id).active = True
+        self.callback(f"record:{self.class_id}")
+        self.message("0012345678", user=self.config.admin_id)
+        self.message("OFF-10", user=self.config.admin_id)
+        self.message("دوره", user=self.config.admin_id)
+        nonce = self.current_nonce()
+        with self.sessions.begin() as session:
+            session.add(Setting(key="feature:discounts", value="0"))
+        self.callback("confirm:" + nonce)
+        self.assertIn("غیرفعال", self.latest_text())
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(Discount)), 0)
+
+    def test_added_admin_can_create_records_and_changes_survive_new_bot(self):
+        from schoolbot.bot import Bot
+
+        self.add_admin()
+        self.runner.bot = Bot(self.config, self.api)
+        self.create_record("OFF-NEW", "دوره جدید", user=26)
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(Discount)).code, "OFF-NEW")
 
     def test_unknown_student_exact_error(self):
         self.message("9999999999")

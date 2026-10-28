@@ -18,6 +18,7 @@ TEXT_FEATURES = {
     "⚙️ تنظیم راه‌های ارتباطی": "contacts",
     "📢 پیام همگانی": "broadcast",
     "👤 مدیریت دانش‌آموز": "students",
+    "🎁 نام بخش تخفیف/رکوردها": "discounts",
 }
 
 
@@ -38,6 +39,7 @@ def callback_features(data):
         "remove": ["students"],
         "toggle": ["students"],
         "unlink": ["students"],
+        "record": ["discounts"],
     }.get(action, [])
 
 
@@ -55,4 +57,6 @@ def state_features(data):
         return ["students"]
     if mode == "contacts":
         return ["contacts"]
+    if mode in ("records_title", "record_student", "record_code", "record_description"):
+        return ["discounts"]
     return []
