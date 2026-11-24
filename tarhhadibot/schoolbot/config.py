@@ -18,7 +18,7 @@ class Config:
     @classmethod
     def from_env(cls):
         load_dotenv()
-        token = os.getenv("BALE_BOT_TOKEN", "")
+        token = os.getenv("BALE_BOT_TOKEN", "").strip()
         target = os.getenv("DATABASE_TARGET", "default").strip().lower()
         if target not in ("default", "local", "main"):
             raise ValueError("DATABASE_TARGET باید default، local یا main باشد.")

@@ -2,6 +2,7 @@ import os
 import unittest
 from datetime import timedelta
 from io import BytesIO
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 from sqlalchemy import create_engine, func, select
@@ -623,6 +624,32 @@ class BotTests(unittest.TestCase):
         self.assertEqual(self.runner.offset(), update["update_id"] + 1)
         with self.sessions() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(Inbox)), 1)
+
+    def test_polling_delivers_start_despite_delayed_update_and_scheduler_error(self):
+        admin = self.config.admin_id
+        self.runner.ingest([{"update_id": 1}])
+        with self.sessions.begin() as session:
+            session.get(Inbox, 1).available_at = utcnow() + timedelta(minutes=5)
+        start = {"update_id": 2, "message": {
+            "from": {"id": admin}, "chat": {"id": admin, "type": "private"}, "text": "/start invite",
+        }}
+        results = iter([True, True, [start], True, []])
+
+        def stop_after_second_poll(method, payload=None):
+            if method == "getUpdates" and payload["offset"] == 3:
+                self.runner.stop()
+            return next(results)
+
+        with patch.object(self.runner, "initialize"), patch("schoolbot.runtime.signal.signal"), patch(
+            "schoolbot.runtime.schedule_reminders", side_effect=RuntimeError("scheduler failure"),
+        ), patch.object(self.api, "call", side_effect=stop_after_second_poll) as call:
+            with self.assertLogs("schoolbot", level="INFO") as logs:
+                self.runner.run()
+        self.assertIn("getUpdates succeeded", " ".join(logs.output))
+        self.assertIn("Meeting reminder job failed", " ".join(logs.output))
+        self.assertEqual([entry.args[0] for entry in call.call_args_list],
+                         ["getMe", "deleteWebhook", "getUpdates", "sendMessage", "getUpdates"])
+        self.assertIn("گزینه موردنظر", call.call_args_list[3].args[1]["text"])
 
     def test_delivery_retry_after_and_failure(self):
         self.message("/start", user=self.config.admin_id)

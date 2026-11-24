@@ -173,6 +173,8 @@ class Bot(MeetingsMixin):
             self.callback(session, chat_id, user_id, state, data)
             return
         text = message.get("text", "").strip()
+        if text.split(maxsplit=1)[:1] == ["/start"]:
+            text = "/start"
         if text == "/id":
             self.say(session, chat_id, f"شناسه عددی حساب شما: {user_id}")
             return

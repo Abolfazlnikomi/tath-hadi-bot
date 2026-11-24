@@ -83,10 +83,10 @@ class Runner:
         identifier = None
         try:
             with self.sessions.begin() as session:
-                inbox = session.scalar(select(Inbox).where(Inbox.status == "pending").order_by(Inbox.update_id).limit(1))
+                inbox = session.scalar(select(Inbox).where(
+                    Inbox.status == "pending", Inbox.available_at <= utcnow(),
+                ).order_by(Inbox.update_id).limit(1))
                 if inbox is None:
-                    return False
-                if inbox.available_at.replace(tzinfo=utcnow().tzinfo) > utcnow():
                     return False
                 identifier = inbox.update_id
                 self.bot.handle(session, inbox.payload)
@@ -172,19 +172,22 @@ class Runner:
 
     def run(self):
         self.initialize()
+        logger.info("Database initialized; connecting to Bale")
         signal.signal(signal.SIGINT, self.stop)
         signal.signal(signal.SIGTERM, self.stop)
+        method = "getMe"
         while not self.stopping:
             try:
-                self.api.call("getMe")
-                self.api.call("deleteWebhook")
-                break
+                self.api.call(method)
+                if method == "deleteWebhook":
+                    break
+                method = "deleteWebhook"
             except BaleError as error:
                 if error.code in (400, 401, 403, 404):
-                    raise RuntimeError("اتصال اولیه بله رد شد؛ توکن و دسترسی را بررسی کنید.") from None
-                logger.warning("Bale startup unavailable (%s); retrying", error.code)
+                    raise RuntimeError(f"Bale startup failed: {method} ({error.code})") from None
+                logger.warning("Bale startup unavailable: %s (%s); retrying", method, error.code)
                 time.sleep(min(float(error.retry_after or 5), 300))
-        logger.info("Bot started in long polling mode")
+        ready = False
         next_prune = 0
         next_reminders = 0
         while not self.stopping:
@@ -195,22 +198,36 @@ class Runner:
                 for _index in range(20):
                     if self.stopping or not self.process_one():
                         break
-                if time.monotonic() >= next_reminders:
-                    with self.sessions.begin() as session:
-                        schedule_reminders(session)
-                    next_reminders = time.monotonic() + 30
                 for _index in range(10):
                     if self.stopping or not self.deliver_one():
                         break
+                if self.stopping:
+                    break
                 updates = self.api.call("getUpdates", {"offset": self.offset(), "timeout": 2, "limit": 100})
                 self.ingest(updates or [])
+                if not ready:
+                    logger.info("Bot started in long polling mode (getUpdates succeeded)")
+                    ready = True
+                if time.monotonic() >= next_reminders:
+                    next_reminders = time.monotonic() + 30
+                    try:
+                        with self.sessions.begin() as session:
+                            schedule_reminders(session)
+                    except Exception as error:
+                        logger.error("Meeting reminder job failed (%s)", error_location(error))
                 if time.monotonic() >= next_prune:
-                    self.prune()
                     next_prune = time.monotonic() + 3600
+                    try:
+                        self.prune()
+                    except Exception as error:
+                        logger.error("Database cleanup job failed (%s)", error_location(error))
             except BaleError as error:
                 if error.code == 401:
                     raise RuntimeError("توکن ربات نامعتبر یا لغو شده است.") from None
-                logger.warning("Bale unavailable (%s); retrying", error.code)
+                if error.code == 409:
+                    logger.warning("Bale getUpdates conflict (409); check for another instance using this token or an active webhook")
+                else:
+                    logger.warning("Bale getUpdates unavailable (%s); retrying", error.code)
                 time.sleep(min(float(error.retry_after or 5), 300))
 
 
