@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from .api import BaleAPI, BaleError
 from .bot import Bot
 from .config import Config
+from .meetings import schedule_reminders, valid_delivery
 from .models import Base, Conversation, Inbox, LoginThrottle, Outbox, Setting, utcnow
 
 
@@ -102,6 +103,10 @@ class Runner:
             ).limit(1))
             if message is None:
                 return False
+            if (message.dedupe_key or "").startswith("meeting:") and not valid_delivery(session, message, utcnow()):
+                message.status = "expired"
+                message.payload = {}
+                return True
             try:
                 self.api.call(message.method, message.payload)
             except BaleError as error:
@@ -125,7 +130,7 @@ class Runner:
 
         cutoff = utcnow() - timedelta(days=30)
         with self.sessions.begin() as session:
-            session.execute(delete(Outbox).where(Outbox.status == "sent", Outbox.created_at < cutoff))
+            session.execute(delete(Outbox).where(Outbox.status.in_(("sent", "expired")), Outbox.created_at < cutoff))
             highest = session.scalar(select(func.max(Inbox.update_id)))
             if highest is not None:
                 session.execute(delete(Inbox).where(Inbox.status == "done", Inbox.update_id < highest - 10000))
@@ -163,6 +168,7 @@ class Runner:
                 time.sleep(min(float(error.retry_after or 5), 300))
         logger.info("Bot started in long polling mode")
         next_prune = 0
+        next_reminders = 0
         while not self.stopping:
             try:
                 if self.lock_connection is not None:
@@ -171,6 +177,10 @@ class Runner:
                 for _index in range(20):
                     if self.stopping or not self.process_one():
                         break
+                if time.monotonic() >= next_reminders:
+                    with self.sessions.begin() as session:
+                        schedule_reminders(session)
+                    next_reminders = time.monotonic() + 30
                 for _index in range(10):
                     if self.stopping or not self.deliver_one():
                         break

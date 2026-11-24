@@ -8,16 +8,20 @@ from sqlalchemy import func, select
 from . import excel
 from .api import BaleError
 from .features import FEATURES, TEXT_FEATURES, callback_features, enabled, state_features
+from .meetings import MeetingsMixin
 from .models import (
     Attendance, Audit, Classroom, Conversation, Discount, Enrollment, LoginThrottle, Outbox, Setting, Student, utcnow,
 )
 from .preferences import is_admin, records_button, records_title, save_setting
 from .service import apply_import, get_pending_absences, members, register_absence, validate_import
 
+REFRESH_BUTTON = "🔄 به‌روزرسانی"
+
 STUDENT_MENU = [
     ["📋 حضور و غیاب من", "🏫 کلاس‌های من"],
     ["📝 ثبت عدم حضور", "🎁 تخفیف‌های من"],
     ["☎️ راه‌های ارتباطی"],
+    ["📅 جلسات من", REFRESH_BUTTON],
 ]
 ADMIN_MENU = [
     ["🏫 کلاس‌ها", "➕ ایجاد کلاس"],
@@ -26,6 +30,7 @@ ADMIN_MENU = [
     ["⚙️ امکانات بات", "⚙️ تنظیم راه‌های ارتباطی"],
     ["👥 مدیریت ادمین‌ها", "🎁 نام بخش تخفیف/رکوردها"],
     ["☎️ راه‌های ارتباطی", "لغو"],
+    ["📅 جلسات", REFRESH_BUTTON],
 ]
 
 
@@ -38,7 +43,7 @@ def reply(admin=False):
             "resize_keyboard": True}
 
 
-class Bot:
+class Bot(MeetingsMixin):
     def __init__(self, config, api):
         self.config = config
         self.api = api
@@ -152,6 +157,9 @@ class Bot:
             if not str(callback["id"]).startswith("1"):
                 self.queue(session, "answerCallbackQuery", {"callback_query_id": callback["id"]})
             data = callback.get("data", "")
+            if data.startswith(("mr:", "my:")):
+                self.registered_participant(session, chat_id, user_id, data)
+                return
             # کال‌بک‌های مربوط به ثبت عدم حضور توسط دانش‌آموز دسترسی ادمین نمی‌خواهند
             if data.startswith("absence_cls:") or (data.startswith("confirm:") and state.data.get("mode") == "confirm_absence") or (data == "cancel" and not admin):
                 self.student_callback(session, chat_id, user_id, state, data)
@@ -159,11 +167,22 @@ class Bot:
             if not admin:
                 self.say(session, chat_id, "دسترسی مجاز نیست.")
                 return
+            if data.startswith("mt:"):
+                self.meeting_admin_callback(session, chat_id, user_id, state, data)
+                return
             self.callback(session, chat_id, user_id, state, data)
             return
         text = message.get("text", "").strip()
         if text == "/id":
             self.say(session, chat_id, f"شناسه عددی حساب شما: {user_id}")
+            return
+        if text in (REFRESH_BUTTON, "به‌روزرسانی", "بروزرسانی", "/refresh"):
+            if not admin and session.scalar(select(Student.id).where(
+                Student.bale_user_id == user_id, Student.chat_id == chat_id, Student.active.is_(True),
+            )) is None:
+                self.say(session, chat_id, "لطفاً کد ملی ۱۰ رقمی خود را ارسال کنید.", {"remove_keyboard": True})
+                return
+            self.say(session, chat_id, "✅ منوی شما به‌روز شد.", self.menu(session, admin, user_id))
             return
         feature = "discounts" if text == records_button(session) else TEXT_FEATURES.get(text)
         if feature and not self.allow(session, chat_id, [feature]):
@@ -268,6 +287,11 @@ class Bot:
             self.say(session, chat_id, f"{student.full_name} عزیز، خوش آمدید.", self.menu(session))
             return
 
+        if text == "📅 جلسات من":
+            self.set_state(state)
+            if student.chat_id == chat_id:
+                self.meeting_list(session, chat_id, student=student)
+            return
         mode = state.data.get("mode")
         if mode == "absence_date":
             clean_date = excel.normalize(text).replace("-", "/").strip()
@@ -434,6 +458,13 @@ class Bot:
         self.say(session, chat_id, info_text, inline([row for row in rows if row]))
 
     def admin_message(self, session, chat_id, user_id, state, message, text):
+        if text == "📅 جلسات":
+            self.set_state(state)
+            self.meeting_list(session, chat_id)
+            return
+        if state.data.get("mode", "").startswith("meeting_"):
+            self.meeting_admin_message(session, chat_id, state, message, text)
+            return
         if text == "👥 مدیریت ادمین‌ها":
             if user_id != self.config.admin_id:
                 self.say(session, chat_id, "فقط مدیر اصلی اجازه مدیریت ادمین‌ها را دارد.")

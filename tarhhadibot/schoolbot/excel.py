@@ -12,6 +12,7 @@ HEADERS = {
     "students": ["نام و نام خانوادگی", "کد ملی", "شماره تماس"],
     "attendance": ["کد ملی", "نام و نام خانوادگی", "وضعیت (حاضر / غایب)"],
     "discounts": ["کد ملی", "نام و نام خانوادگی", "کد تخفیف", "توضیحات/عنوان دوره"],
+    "meeting_invites": ["کد ملی"],
 }
 DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
@@ -120,7 +121,10 @@ def parse(content, kind, classroom_id, max_rows=10000):
                     key = code
                 else:
                     code = national_id(values[0])
-                    if kind == "attendance":
+                    if kind == "meeting_invites":
+                        record = {"national_id": code}
+                        key = code
+                    elif kind == "attendance":
                         if values[2] not in ("حاضر", "غایب"):
                             raise ExcelError("وضعیت فقط حاضر یا غایب است؛ وضعیت خالی مجاز نیست.")
                         record = {"national_id": code, "name": values[1], "status": values[2]}

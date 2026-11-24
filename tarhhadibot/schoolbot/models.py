@@ -85,6 +85,30 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text)
 
 
+class Meeting(Base):
+    __tablename__ = "meetings"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"))
+    topic: Mapped[str] = mapped_column(String(200))
+    location: Mapped[str] = mapped_column(String(200))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    classroom: Mapped[Classroom] = relationship()
+
+
+class MeetingInvite(Base):
+    __tablename__ = "meeting_invites"
+    meeting_id: Mapped[int] = mapped_column(ForeignKey("meetings.id"), primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("students.id"), primary_key=True, index=True)
+    response: Mapped[str | None] = mapped_column(String(3))
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notice_queued: Mapped[bool] = mapped_column(Boolean, default=False)
+    three_queued: Mapped[bool] = mapped_column(Boolean, default=False)
+    one_queued: Mapped[bool] = mapped_column(Boolean, default=False)
+    meeting: Mapped[Meeting] = relationship()
+    student: Mapped[Student] = relationship()
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
     user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)

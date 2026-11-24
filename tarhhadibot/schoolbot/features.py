@@ -10,9 +10,12 @@ FEATURES = {
     "excel": "دریافت و بارگذاری اکسل",
     "broadcast": "ارسال پیام همگانی و کلاسی",
     "contacts": "راه‌های ارتباطی",
+    "meetings": "جلسات و یادآوری",
 }
 
 TEXT_FEATURES = {
+    "📅 جلسات": "meetings",
+    "📅 جلسات من": "meetings",
     "📋 حضور و غیاب من": "attendance",
     "📝 ثبت عدم حضور": "absence",
     "📋 گزارش درخواست‌های عدم حضور": "absence",
