@@ -30,6 +30,10 @@ class Classroom(Base):
     __tablename__ = "classrooms"
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200), unique=True)
+    # فیلدهای جدید اضافه شده:
+    instructor: Mapped[str | None] = mapped_column(String(200))
+    location: Mapped[str | None] = mapped_column(String(200))
+    schedule: Mapped[str | None] = mapped_column(String(200))
 
 
 class Enrollment(Base):
