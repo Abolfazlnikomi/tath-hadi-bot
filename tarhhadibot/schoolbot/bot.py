@@ -2,6 +2,7 @@ import base64
 import secrets
 from datetime import timedelta
 
+import jdatetime
 from sqlalchemy import func, select
 
 from . import excel
@@ -11,14 +12,18 @@ from .models import (
     Attendance, Audit, Classroom, Conversation, Discount, Enrollment, LoginThrottle, Outbox, Setting, Student, utcnow,
 )
 from .preferences import is_admin, records_button, records_title, save_setting
-from .service import apply_import, members, validate_import
+from .service import apply_import, get_pending_absences, members, register_absence, validate_import
 
-STUDENT_MENU = [["📋 حضور و غیاب من", "🏫 کلاس‌های من"], ["🎁 تخفیف‌های من", "☎️ راه‌های ارتباطی"]]
+STUDENT_MENU = [
+    ["📋 حضور و غیاب من", "🏫 کلاس‌های من"],
+    ["📝 ثبت عدم حضور", "🎁 تخفیف‌های من"],
+    ["☎️ راه‌های ارتباطی"],
+]
 ADMIN_MENU = [
     ["🏫 کلاس‌ها", "➕ ایجاد کلاس"],
-    ["📢 پیام همگانی", "⚙️ تنظیم راه‌های ارتباطی"],
+    ["📢 پیام همگانی", "📋 گزارش درخواست‌های عدم حضور"],
     ["📊 وضعیت ارسال‌ها", "👤 مدیریت دانش‌آموز"],
-    ["⚙️ امکانات بات"],
+    ["⚙️ امکانات بات", "⚙️ تنظیم راه‌های ارتباطی"],
     ["👥 مدیریت ادمین‌ها", "🎁 نام بخش تخفیف/رکوردها"],
     ["☎️ راه‌های ارتباطی", "لغو"],
 ]
@@ -146,10 +151,15 @@ class Bot:
         if callback:
             if not str(callback["id"]).startswith("1"):
                 self.queue(session, "answerCallbackQuery", {"callback_query_id": callback["id"]})
+            data = callback.get("data", "")
+            # کال‌بک‌های مربوط به ثبت عدم حضور توسط دانش‌آموز دسترسی ادمین نمی‌خواهند
+            if data.startswith("absence_cls:") or (data.startswith("confirm:") and state.data.get("mode") == "confirm_absence") or (data == "cancel" and not admin):
+                self.student_callback(session, chat_id, user_id, state, data)
+                return
             if not admin:
                 self.say(session, chat_id, "دسترسی مجاز نیست.")
                 return
-            self.callback(session, chat_id, user_id, state, callback.get("data", ""))
+            self.callback(session, chat_id, user_id, state, data)
             return
         text = message.get("text", "").strip()
         if text == "/id":
@@ -174,6 +184,55 @@ class Bot:
             self.admin_message(session, chat_id, user_id, state, message, text)
         else:
             self.student_message(session, chat_id, user_id, state, text)
+
+    def student_callback(self, session, chat_id, user_id, state, data):
+        parts = data.split(":")
+        action = parts[0]
+        if action == "cancel":
+            self.set_state(state)
+            self.home(session, chat_id, False)
+            return
+        if action == "absence_cls" and len(parts) == 2 and parts[1].isdigit():
+            classroom_id = int(parts[1])
+            classroom = session.get(Classroom, classroom_id)
+            if not classroom:
+                self.say(session, chat_id, "کلاس یافت نشد.")
+                return
+            self.set_state(state, mode="absence_date", classroom_id=classroom.id, classroom_title=classroom.title)
+            today_shamsi = jdatetime.date.today().strftime("%Y/%m/%d")
+            self.say(
+                session, chat_id,
+                f"کلاس انتخاب شده: {classroom.title}\n\n"
+                f"لطفاً تاریخ عدم حضور را به صورت شمسی ارسال کنید (مثال: {today_shamsi})\n"
+                f"همچنین می‌توانید کلمه «امروز» یا «فردا» را ارسال فرمایید."
+            )
+            return
+        if action == "confirm":
+            if len(parts) != 2 or parts[1] != state.data.get("nonce"):
+                self.say(session, chat_id, "این درخواست منقضی شده یا قبلاً ثبت شده است.")
+                return
+            if state.data.get("mode") == "confirm_absence":
+                from datetime import date as dt_date
+                absence_d = dt_date.fromisoformat(state.data["absence_date"])
+                student = session.scalar(select(Student).where(Student.bale_user_id == user_id, Student.active.is_(True)))
+                if not student:
+                    self.say(session, chat_id, "اطلاعات دانش‌آموز یافت نشد.")
+                    self.set_state(state)
+                    return
+                register_absence(
+                    session=session,
+                    student_id=student.id,
+                    classroom_id=state.data["classroom_id"],
+                    absence_date=absence_d,
+                    reason=state.data.get("reason"),
+                )
+                self.audit(session, user_id, "register_absence", classroom_id=state.data["classroom_id"], date=str(absence_d))
+                self.set_state(state)
+                self.say(
+                    session, chat_id,
+                    "✅ درخواست عدم حضور شما با موفقیت ثبت شد و به اطلاع مدیریت خواهد رسید.",
+                    self.menu(session, False, user_id)
+                )
 
     def student_message(self, session, chat_id, user_id, state, text):
         student = session.scalar(select(Student).where(Student.bale_user_id == user_id, Student.active.is_(True)))
@@ -207,7 +266,67 @@ class Bot:
             session.delete(throttle)
             self.audit(session, user_id, "student_login", student_id=student.id)
             self.say(session, chat_id, f"{student.full_name} عزیز، خوش آمدید.", self.menu(session))
-        elif text == "🏫 کلاس‌های من":
+            return
+
+        mode = state.data.get("mode")
+        if mode == "absence_date":
+            clean_date = excel.normalize(text).replace("-", "/").strip()
+            target_gregorian = None
+            if clean_date in ("امروز", ""):
+                target_gregorian = excel.today()[0]
+                jalali_str = jdatetime.date.today().strftime("%Y/%m/%d")
+            elif clean_date == "فردا":
+                target_gregorian = excel.today()[0] + timedelta(days=1)
+                jalali_str = (jdatetime.date.today() + timedelta(days=1)).strftime("%Y/%m/%d")
+            else:
+                parts = clean_date.split("/")
+                if len(parts) == 3 and all(p.isdigit() for p in parts):
+                    try:
+                        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+                        j_d = jdatetime.date(y, m, d)
+                        target_gregorian = j_d.togregorian()
+                        jalali_str = j_d.strftime("%Y/%m/%d")
+                    except Exception:
+                        pass
+            if not target_gregorian:
+                self.say(session, chat_id, "فرمت تاریخ نامعتبر است. لطفاً به صورت نمونه (مثلاً 1403/08/15) یا عبارت «امروز» یا «فردا» ارسال کنید.")
+                return
+
+            self.set_state(
+                state,
+                mode="absence_reason",
+                classroom_id=state.data["classroom_id"],
+                classroom_title=state.data["classroom_title"],
+                absence_date=target_gregorian.isoformat(),
+                jalali_date=jalali_str,
+            )
+            self.say(session, chat_id, "علت عدم حضور را بنویسید (در صورت تمایل به خالی ماندن، کاراکتر «-» را بفرستید):")
+            return
+
+        elif mode == "absence_reason":
+            reason = None if text.strip() in ("-", "") else text.strip()[:1000]
+            nonce = secrets.token_hex(8)
+            self.set_state(
+                state,
+                mode="confirm_absence",
+                nonce=nonce,
+                classroom_id=state.data["classroom_id"],
+                classroom_title=state.data["classroom_title"],
+                absence_date=state.data["absence_date"],
+                jalali_date=state.data["jalali_date"],
+                reason=reason,
+            )
+            preview = (
+                f"📋 پیش‌نمایش اطلاع‌رسانی عدم حضور:\n\n"
+                f"🏫 کلاس: {state.data['classroom_title']}\n"
+                f"📅 تاریخ: {state.data['jalali_date']}\n"
+                f"📝 دلیل: {reason or 'ذکر نشده'}\n\n"
+                f"آیا این درخواست ثبت و ارسال شود؟"
+            )
+            self.say(session, chat_id, preview, inline([[("تأیید و ارسال", f"confirm:{nonce}"), ("لغو", "cancel")]]))
+            return
+
+        if text == "🏫 کلاس‌های من":
             classes = session.execute(
                 select(Classroom)
                     .join(Enrollment, Enrollment.classroom_id == Classroom.id)
@@ -226,6 +345,20 @@ class Bot:
                     f"📍 مکان/آدرس: {cls.location or 'ثبت نشده'}"
                 )
             self.say(session, chat_id, "📋 لیست کلاس‌های شما:\n\n" + "\n\n────────────\n\n".join(items))
+        elif text == "📝 ثبت عدم حضور":
+            classes = session.execute(
+                select(Classroom)
+                    .join(Enrollment, Enrollment.classroom_id == Classroom.id)
+                    .where(Enrollment.student_id == student.id)
+                    .order_by(Classroom.title)
+            ).scalars().all()
+            if not classes:
+                self.say(session, chat_id, "شما در هیچ کلاسی عضو نیستید.")
+                return
+            rows = [[(cls.title, f"absence_cls:{cls.id}")] for cls in classes]
+            rows.append([("لغو", "cancel")])
+            self.set_state(state)
+            self.say(session, chat_id, "کلاسی را که قصد ثبت عدم حضور در آن دارید انتخاب کنید:", inline(rows))
         elif text == "📋 حضور و غیاب من":
             records = session.execute(select(Attendance, Classroom.title).join(
                 Classroom, Classroom.id == Attendance.classroom_id,
@@ -307,6 +440,23 @@ class Bot:
                 return
             self.set_state(state)
             self.admins_menu(session, chat_id)
+            return
+        if text == "📋 گزارش درخواست‌های عدم حضور":
+            self.set_state(state)
+            requests = get_pending_absences(session)
+            if not requests:
+                self.say(session, chat_id, "در حال حاضر هیچ درخواست عدم حضور بررسی‌نشده‌ای وجود ندارد.")
+                return
+            content = excel.generate_absence_report(requests)
+            current_date, jalali = excel.today()
+            self.queue(session, "sendDocument", {
+                "chat_id": chat_id,
+                "caption": f"📋 گزارش درخواست‌های عدم حضور دانش‌آموزان\n📅 تاریخ گزارش: {jalali}\nتعداد رکوردهای ثبت‌شده: {len(requests)}",
+                "_file": {
+                    "name": f"absence_requests_{current_date.isoformat()}.xlsx",
+                    "content": base64.b64encode(content).decode("ascii"),
+                },
+            })
             return
         if text == "🎁 نام بخش تخفیف/رکوردها":
             self.set_state(state, mode="records_title")
@@ -490,12 +640,9 @@ class Bot:
             self.set_state(state, mode="confirm_import", nonce=nonce, pending=pending, source="excel")
             preview = f"تعداد ردیف معتبر: {len(pending['rows'])}\n"
             if pending["kind"] == "attendance":
-                import jdatetime
-                from datetime import date
-
-                jalali = jdatetime.date.fromgregorian(date=date.fromisoformat(pending["session_date"]))
+                jalali = jdatetime.date.fromgregorian(date=jdatetime.date.fromisoformat(pending["session_date"])) if hasattr(jdatetime.date, "fromisoformat") else jdatetime.date.today()
                 present = sum(row["status"] == "حاضر" for row in pending["rows"])
-                preview += f"تاریخ جلسه: {jalali.strftime('%Y/%m/%d')}\nحاضر: {present} | غایب: {len(pending['rows']) - present}\n"
+                preview += f"تاریخ جلسه: {pending['session_date']}\nحاضر: {present} | غایب: {len(pending['rows']) - present}\n"
             preview += "ثبت نهایی انجام شود؟ رکوردهای موجود به‌روز می‌شوند و اعضای حذف‌شده از فایل، حذف نخواهند شد."
             self.say(session, chat_id, preview, inline([[("تأیید ثبت", f"confirm:{nonce}"), ("لغو", "cancel")]]))
         elif mode == "broadcast":

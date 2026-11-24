@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, datetime
 
 import jdatetime
 from sqlalchemy import select
 
-from .models import Attendance, Classroom, Discount, Enrollment, Outbox, Student, utcnow
+from .models import AbsenceRequest, Attendance, Classroom, Discount, Enrollment, Outbox, Student, utcnow
 
 
 def members(session, classroom_id):
@@ -82,3 +82,26 @@ def apply_import(session, pending):
                 discount.description = row["description"]
         count += 1
     return count
+
+# توابع جدید برای مدیریت عدم حضور
+def register_absence(session, student_id: int, classroom_id: int, date_str: str, reason: str = ""):
+    """ثبت یک درخواست عدم حضور جدید در دیتابیس"""
+    req = AbsenceRequest(
+        student_id=student_id,
+        classroom_id=classroom_id,
+        absence_date=date_str,
+        reason=reason,
+        created_at=utcnow(),
+    )
+    session.add(req)
+    session.commit()
+    return req
+
+def get_pending_absences(session):
+    """دریافت تمام درخواست‌های عدم حضور برای گزارش‌گیری ادمین"""
+    return list(session.scalars(
+        select(AbsenceRequest)
+        .join(Student, AbsenceRequest.student_id == Student.id)
+        .join(Classroom, AbsenceRequest.classroom_id == Classroom.id)
+        .order_by(AbsenceRequest.id.desc())
+    ))

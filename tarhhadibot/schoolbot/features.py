@@ -5,6 +5,7 @@ FEATURES = {
     "students": "مدیریت و بارگذاری کاربران",
     "attendance": "حضور و غیاب",
     "manual_attendance": "ثبت حضور و غیاب بدون اکسل",
+    "absence": "اطلاع‌رسانی عدم حضور",
     "discounts": "کدهای تخفیف",
     "excel": "دریافت و بارگذاری اکسل",
     "broadcast": "ارسال پیام همگانی و کلاسی",
@@ -13,6 +14,8 @@ FEATURES = {
 
 TEXT_FEATURES = {
     "📋 حضور و غیاب من": "attendance",
+    "📝 ثبت عدم حضور": "absence",
+    "📋 گزارش درخواست‌های عدم حضور": "absence",
     "🎁 تخفیف‌های من": "discounts",
     "☎️ راه‌های ارتباطی": "contacts",
     "⚙️ تنظیم راه‌های ارتباطی": "contacts",
@@ -40,6 +43,8 @@ def callback_features(data):
         "toggle": ["students"],
         "unlink": ["students"],
         "record": ["discounts"],
+        "absence": ["absence"],
+        "absence_list": ["absence"],
     }.get(action, [])
 
 
@@ -59,4 +64,6 @@ def state_features(data):
         return ["contacts"]
     if mode in ("records_title", "record_student", "record_code", "record_description"):
         return ["discounts"]
+    if mode in ("absence_class", "absence_date", "absence_reason", "confirm_absence"):
+        return ["absence"]
     return []

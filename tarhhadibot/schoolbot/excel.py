@@ -4,7 +4,7 @@ from zipfile import ZipFile
 
 import jdatetime
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from zoneinfo import ZoneInfo
 
 
@@ -145,3 +145,55 @@ def parse(content, kind, classroom_id, max_rows=10000):
         raise ExcelError("ساختار فایل معتبر نیست؛ از فایل نمونه ربات استفاده کنید.") from error
     finally:
         book.close()
+
+
+def export_absences_excel(absences):
+    """تولید فایل اکسل از لیست درخواست‌های عدم حضور"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "درخواست‌های عدم حضور"
+    ws.sheet_view.rightToLeft = True
+
+    headers = ["شناسه", "نام و نام خانوادگی", "کد ملی", "کلاس", "تاریخ غیبت", "علت / توضیحات", "تاریخ ثبت درخواست"]
+    ws.append(headers)
+
+    # استایل سرستون‌ها مشابه تابع workbook
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="245B78")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # درج داده‌ها
+    for item in absences:
+        ws.append([
+            item.id,
+            getattr(item.student, "full_name", "-"),
+            getattr(item.student, "national_id", "-"),
+            getattr(item.classroom, "title", "-"),
+            item.absence_date,
+            item.reason or "-",
+            item.created_at.strftime("%Y-%m-%d %H:%M") if item.created_at else "-",
+        ])
+
+    # تنظیم خودکار عرض ستون‌ها
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 4)
+        ws.column_dimensions[column].width = adjusted_width
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+    stream = BytesIO()
+    wb.save(stream)
+    stream.seek(0)
+    return stream.getvalue()

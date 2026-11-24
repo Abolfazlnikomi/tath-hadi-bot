@@ -4,7 +4,7 @@ from sqlalchemy import (
     JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, Integer,
     String, Text, UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 def utcnow():
@@ -62,6 +62,21 @@ class Discount(Base):
     student_id: Mapped[int] = mapped_column(ForeignKey("students.id"))
     code: Mapped[str] = mapped_column(String(200))
     description: Mapped[str] = mapped_column(Text, default="")
+
+
+class AbsenceRequest(Base):
+    __tablename__ = "absence_requests"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(ForeignKey("students.id"))
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"))
+    absence_date: Mapped[date] = mapped_column(Date)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, processed
+
+    # ارتباط‌ها جهت استخراج مستقیم نام دانش‌آموز، کلاس و مربی در گزارش اکسل
+    student: Mapped["Student"] = relationship()
+    classroom: Mapped["Classroom"] = relationship()
 
 
 class Setting(Base):
