@@ -1,6 +1,6 @@
 import base64
 import secrets
-from datetime import timedelta
+from datetime import date, timedelta
 
 import jdatetime
 from sqlalchemy import func, select
@@ -15,7 +15,13 @@ from .models import (
 from .preferences import is_admin, records_button, records_title, save_setting
 from .service import apply_import, get_pending_absences, members, register_absence, validate_import
 
-REFRESH_BUTTON = "🔄 به‌روزرسانی"
+REFRESH_BUTTON = "🔄 به‌روزرسانی بات"
+
+
+def is_refresh(text):
+    label = text.lstrip("🔄\ufe0f ").translate(str.maketrans({"ي": "ی", "ك": "ک", "\u200c": None}))
+    compact = "".join(label.split())
+    return text == "/refresh" or compact in {"بهروزرسانی", "بروزرسانی", "بهروزرسانیبات", "بروزرسانیبات"}
 
 STUDENT_MENU = [
     ["📋 حضور و غیاب من", "🏫 کلاس‌های من"],
@@ -76,8 +82,8 @@ class Bot(MeetingsMixin):
     def audit(self, session, user_id, action, **details):
         session.add(Audit(actor_id=user_id, action=action, details=details))
 
-    def home(self, session, chat_id, admin):
-        self.say(session, chat_id, "گزینه موردنظر را انتخاب کنید.", self.menu(session, admin, chat_id))
+    def home(self, session, chat_id, admin, user_id=None):
+        self.say(session, chat_id, "گزینه موردنظر را انتخاب کنید.", self.menu(session, admin, user_id))
 
     def menu(self, session, admin=False, user_id=None):
         markup = reply(admin)
@@ -136,13 +142,18 @@ class Bot(MeetingsMixin):
 
     def handle(self, session, update):
         callback = update.get("callback_query")
-        message = callback.get("message", {}) if callback else update.get("message", {})
-        sender = callback.get("from", {}) if callback else message.get("from", {})
-        user_id = sender.get("id")
-        chat = message.get("chat", {})
-        if not user_id or chat.get("type") != "private":
+        if callback is not None and not isinstance(callback, dict):
             return
-        chat_id = chat["id"]
+        message = callback.get("message", {}) if callback else update.get("message", {})
+        if not isinstance(message, dict):
+            return
+        sender = callback.get("from", {}) if callback else message.get("from", {})
+        chat = message.get("chat", {})
+        if not isinstance(sender, dict) or not isinstance(chat, dict):
+            return
+        user_id, chat_id = sender.get("id"), chat.get("id")
+        if type(user_id) is not int or type(chat_id) is not int or chat.get("type") != "private":
+            return
         admin = is_admin(session, user_id, self.config.admin_id)
         if user_id == self.config.admin_id:
             setting = session.get(Setting, "admin_chat_id")
@@ -154,9 +165,12 @@ class Bot(MeetingsMixin):
         if state.data and (utcnow() - state.updated_at.replace(tzinfo=utcnow().tzinfo)) > timedelta(hours=2):
             self.set_state(state)
         if callback:
-            if not str(callback["id"]).startswith("1"):
-                self.queue(session, "answerCallbackQuery", {"callback_query_id": callback["id"]})
-            data = callback.get("data", "")
+            callback_id = callback.get("id")
+            if (isinstance(callback_id, str) and callback_id) or type(callback_id) is int:
+                self.queue(session, "answerCallbackQuery", {"callback_query_id": str(callback_id)})
+            data = callback.get("data")
+            if not isinstance(data, str) or not data:
+                return
             if data.startswith(("mr:", "my:")):
                 self.registered_participant(session, chat_id, user_id, data)
                 return
@@ -172,13 +186,16 @@ class Bot(MeetingsMixin):
                 return
             self.callback(session, chat_id, user_id, state, data)
             return
-        text = message.get("text", "").strip()
+        raw_text = message.get("text")
+        if not admin and not isinstance(raw_text, str):
+            return
+        text = raw_text.strip() if isinstance(raw_text, str) else ""
         if text.split(maxsplit=1)[:1] == ["/start"]:
             text = "/start"
         if text == "/id":
             self.say(session, chat_id, f"شناسه عددی حساب شما: {user_id}")
             return
-        if text in (REFRESH_BUTTON, "به‌روزرسانی", "بروزرسانی", "/refresh"):
+        if is_refresh(text):
             if not admin and session.scalar(select(Student.id).where(
                 Student.bale_user_id == user_id, Student.chat_id == chat_id, Student.active.is_(True),
             )) is None:
@@ -192,7 +209,7 @@ class Bot(MeetingsMixin):
         if text in ("/start", "/cancel", "لغو", "منوی اصلی"):
             self.set_state(state)
             if admin:
-                self.home(session, chat_id, True)
+                self.home(session, chat_id, True, user_id)
             else:
                 student = session.scalar(
                     select(Student).where(Student.bale_user_id == user_id, Student.active.is_(True)))
@@ -225,7 +242,7 @@ class Bot(MeetingsMixin):
                 self.say(session, chat_id, "کلاس یافت نشد.")
                 return
             self.set_state(state, mode="absence_date", classroom_id=classroom.id, classroom_title=classroom.title)
-            today_shamsi = jdatetime.date.today().strftime("%Y/%m/%d")
+            _, today_shamsi = excel.today()
             self.say(
                 session, chat_id,
                 f"کلاس انتخاب شده: {classroom.title}\n\n"
@@ -307,12 +324,10 @@ class Bot(MeetingsMixin):
         if mode == "absence_date":
             clean_date = excel.normalize(text).replace("-", "/").strip()
             target_gregorian = None
-            if clean_date in ("امروز", ""):
-                target_gregorian = excel.today()[0]
-                jalali_str = jdatetime.date.today().strftime("%Y/%m/%d")
-            elif clean_date == "فردا":
-                target_gregorian = excel.today()[0] + timedelta(days=1)
-                jalali_str = (jdatetime.date.today() + timedelta(days=1)).strftime("%Y/%m/%d")
+            if clean_date in ("امروز", "فردا"):
+                today, _ = excel.today()
+                target_gregorian = today + timedelta(days=1 if clean_date == "فردا" else 0)
+                jalali_str = jdatetime.date.fromgregorian(date=target_gregorian).strftime("%Y/%m/%d")
             else:
                 parts = clean_date.split("/")
                 if len(parts) == 3 and all(p.isdigit() for p in parts):
@@ -321,7 +336,7 @@ class Bot(MeetingsMixin):
                         j_d = jdatetime.date(y, m, d)
                         target_gregorian = j_d.togregorian()
                         jalali_str = j_d.strftime("%Y/%m/%d")
-                    except Exception:
+                    except (ValueError, OverflowError):
                         pass
             if not target_gregorian:
                 self.say(session, chat_id, "فرمت تاریخ نامعتبر است. لطفاً به صورت نمونه (مثلاً 1403/08/15) یا عبارت «امروز» یا «فردا» ارسال کنید.")
@@ -682,9 +697,9 @@ class Bot(MeetingsMixin):
             self.set_state(state, mode="confirm_import", nonce=nonce, pending=pending, source="excel")
             preview = f"تعداد ردیف معتبر: {len(pending['rows'])}\n"
             if pending["kind"] == "attendance":
-                jalali = jdatetime.date.fromgregorian(date=jdatetime.date.fromisoformat(pending["session_date"])) if hasattr(jdatetime.date, "fromisoformat") else jdatetime.date.today()
+                jalali = jdatetime.date.fromgregorian(date=date.fromisoformat(pending["session_date"])).strftime("%Y/%m/%d")
                 present = sum(row["status"] == "حاضر" for row in pending["rows"])
-                preview += f"تاریخ جلسه: {pending['session_date']}\nحاضر: {present} | غایب: {len(pending['rows']) - present}\n"
+                preview += f"تاریخ جلسه: {jalali}\nحاضر: {present} | غایب: {len(pending['rows']) - present}\n"
             preview += "ثبت نهایی انجام شود؟ رکوردهای موجود به‌روز می‌شوند و اعضای حذف‌شده از فایل، حذف نخواهند شد."
             self.say(session, chat_id, preview, inline([[("تأیید ثبت", f"confirm:{nonce}"), ("لغو", "cancel")]]))
         elif mode == "broadcast":
@@ -782,7 +797,7 @@ class Bot(MeetingsMixin):
             if parts[1] in ("attendance", "discounts", "contacts"):
                 self.refresh_student_menus(session)
             self.feature_menu(session, chat_id)
-            self.home(session, chat_id, True)
+            self.home(session, chat_id, True, user_id)
             return
         required = callback_features(data)
         if action in ("confirm", "mark"):
@@ -809,7 +824,7 @@ class Bot(MeetingsMixin):
             return
         if action == "cancel":
             self.set_state(state)
-            self.home(session, chat_id, True)
+            self.home(session, chat_id, True, user_id)
             return
         if action == "confirm":
             if len(parts) != 2 or parts[1] != state.data.get("nonce"):

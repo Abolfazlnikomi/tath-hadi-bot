@@ -73,6 +73,20 @@ class APITests(unittest.TestCase):
             self.api.call("getUpdates")
         self.assertEqual(raised.exception.code, 502)
 
+    def test_malformed_error_metadata_does_not_crash_api_client(self):
+        for status, body, expected in (
+            (200, {"ok": False, "error_code": "429", "parameters": {"retry_after": "nan"}}, 429),
+            (503, {"ok": False, "parameters": None}, 503),
+            (200, {"ok": True}, 502),
+        ):
+            with self.subTest(status=status, body=body):
+                self.api.client.close()
+                self.transport(lambda request: httpx.Response(status, json=body))
+                with self.assertRaises(BaleError) as raised:
+                    self.api.call("getUpdates")
+                self.assertEqual(raised.exception.code, expected)
+                self.assertIsNone(raised.exception.retry_after)
+
     def test_download_size_enforced_on_stream(self):
         self.api.config = replace(self.config, max_file_bytes=3)
 

@@ -1,8 +1,11 @@
 import os
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 
 @dataclass(frozen=True)
@@ -17,7 +20,7 @@ class Config:
 
     @classmethod
     def from_env(cls):
-        load_dotenv()
+        load_dotenv(Path(__file__).resolve().parent.parent / ".env")
         token = os.getenv("BALE_BOT_TOKEN", "").strip()
         target = os.getenv("DATABASE_TARGET", "default").strip().lower()
         if target not in ("default", "local", "main"):
@@ -27,9 +30,15 @@ class Config:
         if database_url.startswith("postgresql://"):
             database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
         if not token or token == "replace_with_a_new_token":
-            raise ValueError("توکن جدید را در BALE_BOT_TOKEN تنظیم کنید.")
+            raise ValueError("توکن را در BALE_BOT_TOKEN تنظیم کنید؛ برای شروع از .env.example یک .env بسازید.")
         if not database_url.startswith("postgresql+psycopg://"):
             raise ValueError(f"{variable} باید اتصال PostgreSQL با درایور psycopg باشد.")
+        try:
+            database = make_url(database_url)
+            if not database.database or (database.port is not None and not 1 <= database.port <= 65535):
+                raise ValueError
+        except (ArgumentError, ValueError):
+            raise ValueError(f"آدرس {variable} معتبر نیست؛ نام پایگاه داده و پورت را بررسی کنید.") from None
         interval = float(os.getenv("SEND_INTERVAL", "0.15"))
         if not math.isfinite(interval) or interval < 0.05:
             raise ValueError("SEND_INTERVAL باید حداقل 0.05 باشد.")

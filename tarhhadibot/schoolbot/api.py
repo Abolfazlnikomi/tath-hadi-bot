@@ -1,5 +1,6 @@
 import base64
 import json
+import math
 import time
 from urllib.parse import quote, unquote, urlsplit
 
@@ -11,6 +12,29 @@ class BaleError(Exception):
         self.code = code
         self.retry_after = retry_after
         super().__init__(f"Bale API error {code}")
+
+
+def response_error(response, result=None):
+    result = result if isinstance(result, dict) else {}
+    code = response.status_code if response.status_code >= 400 else 502
+    if response.status_code < 400:
+        try:
+            provided = int(str(result.get("error_code")))
+            if 400 <= provided <= 599:
+                code = provided
+        except ValueError:
+            pass
+    parameters = result.get("parameters")
+    seconds = parameters.get("retry_after") if isinstance(parameters, dict) else None
+    if seconds is None and code == 429:
+        seconds = response.headers.get("Retry-After")
+    try:
+        seconds = float(str(seconds))
+    except ValueError:
+        seconds = None
+    if seconds is not None and (not math.isfinite(seconds) or not 0 < seconds <= 86400):
+        seconds = None
+    return BaleError(code, seconds)
 
 
 class BaleAPI:
@@ -45,15 +69,14 @@ class BaleAPI:
             try:
                 result = response.json()
             except ValueError:
-                raise BaleError(response.status_code if response.status_code >= 400 else 502) from None
-            if not isinstance(result, dict):
-                raise BaleError(502)
-            if not result.get("ok"):
-                retry_after = result.get("parameters", {}).get("retry_after")
-                if retry_after:
-                    self.next_request = time.monotonic() + float(retry_after)
-                raise BaleError(result.get("error_code", response.status_code), retry_after)
-            return result.get("result")
+                raise response_error(response) from None
+            if (not response.is_success or not isinstance(result, dict)
+                    or result.get("ok") is not True or "result" not in result):
+                error = response_error(response, result)
+                if error.retry_after:
+                    self.next_request = time.monotonic() + error.retry_after
+                raise error
+            return result["result"]
         except httpx.HTTPError:
             raise BaleError(503) from None
         finally:

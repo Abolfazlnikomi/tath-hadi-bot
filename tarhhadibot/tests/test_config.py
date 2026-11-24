@@ -31,3 +31,8 @@ class ConfigTests(unittest.TestCase):
     def test_invalid_target(self):
         with self.assertRaisesRegex(ValueError, "DATABASE_TARGET"):
             self.config(DATABASE_TARGET="invalid")
+
+    def test_bad_postgres_url_does_not_expose_password(self):
+        with self.assertRaisesRegex(ValueError, "DATABASE_URL") as raised:
+            self.config(DATABASE_URL="postgresql://bale:secret@localhost:not-a-port/db")
+        self.assertNotIn("secret", str(raised.exception))

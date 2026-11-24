@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, func, select
 
 from schoolbot import excel
 from schoolbot.api import BaleError
+from schoolbot.bot import REFRESH_BUTTON
 from schoolbot.config import Config
 from schoolbot.models import (
     Attendance, Base, Classroom, Conversation, Discount, Enrollment, Inbox, Outbox, Setting, Student, utcnow,
@@ -278,9 +279,11 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("🎁 تخفیف‌های من", self.button_texts(self.last_payload_for(25)))
         self.callback("feature:attendance:0")
         self.callback("feature:contacts:0")
-        self.assertEqual(self.last_payload_for(25)["reply_markup"], {"remove_keyboard": True})
+        remaining = ["🏫 کلاس‌های من", "📝 ثبت عدم حضور", "📅 جلسات من", REFRESH_BUTTON]
+        self.assertEqual(self.button_texts(self.last_payload_for(25)), remaining)
         self.message("🎁 تخفیف‌های من")
-        self.assertEqual(self.last_payload_for(25)["reply_markup"], {"remove_keyboard": True})
+        self.assertIn("غیرفعال", self.latest_text())
+        self.assertEqual(self.button_texts(self.last_payload_for(25)), remaining)
         self.callback("feature:discounts:1")
         self.assertIn("🎁 تخفیف‌های من", self.button_texts(self.last_payload_for(25)))
 
@@ -625,6 +628,27 @@ class BotTests(unittest.TestCase):
         with self.sessions() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(Inbox)), 1)
 
+    def test_ingest_preserves_valid_updates_in_a_malformed_out_of_order_batch(self):
+        with self.assertLogs("schoolbot", level="WARNING"):
+            self.runner.ingest([{"update_id": 11}, None, {"update_id": 9}, {"update_id": 11}, {"update_id": True}])
+        self.assertEqual(self.runner.offset(), 12)
+        self.runner.ingest([{"update_id": 10}])
+        with self.sessions() as session:
+            self.assertEqual(list(session.scalars(select(Inbox.update_id).order_by(Inbox.update_id))), [9, 11])
+        with self.assertRaises(BaleError):
+            self.runner.ingest({"unexpected": []})
+        self.assertEqual(self.runner.offset(), 12)
+
+    def test_numeric_prefix_callback_is_acknowledged(self):
+        user = self.config.admin_id
+        self.runner.ingest([{"update_id": 1, "callback_query": {
+            "id": "10001", "from": {"id": user}, "data": "cancel",
+            "message": {"chat": {"id": user, "type": "private"}},
+        }}])
+        self.assertTrue(self.runner.process_one())
+        self.assertTrue(self.runner.deliver_one())
+        self.assertEqual(self.api.calls[0], ("answerCallbackQuery", {"callback_query_id": "10001"}))
+
     def test_polling_delivers_start_despite_delayed_update_and_scheduler_error(self):
         admin = self.config.admin_id
         self.runner.ingest([{"update_id": 1}])
@@ -633,10 +657,11 @@ class BotTests(unittest.TestCase):
         start = {"update_id": 2, "message": {
             "from": {"id": admin}, "chat": {"id": admin, "type": "private"}, "text": "/start invite",
         }}
-        results = iter([True, True, [start], True, []])
+        refresh = {"update_id": 3, "message": {**start["message"], "text": REFRESH_BUTTON}}
+        results = iter([True, True, [start, refresh], True, True, []])
 
         def stop_after_second_poll(method, payload=None):
-            if method == "getUpdates" and payload["offset"] == 3:
+            if method == "getUpdates" and payload["offset"] == 4:
                 self.runner.stop()
             return next(results)
 
@@ -648,8 +673,9 @@ class BotTests(unittest.TestCase):
         self.assertIn("getUpdates succeeded", " ".join(logs.output))
         self.assertIn("Meeting reminder job failed", " ".join(logs.output))
         self.assertEqual([entry.args[0] for entry in call.call_args_list],
-                         ["getMe", "deleteWebhook", "getUpdates", "sendMessage", "getUpdates"])
+                         ["getMe", "deleteWebhook", "getUpdates", "sendMessage", "sendMessage", "getUpdates"])
         self.assertIn("گزینه موردنظر", call.call_args_list[3].args[1]["text"])
+        self.assertIn("منوی شما به‌روز شد", call.call_args_list[4].args[1]["text"])
 
     def test_delivery_retry_after_and_failure(self):
         self.message("/start", user=self.config.admin_id)

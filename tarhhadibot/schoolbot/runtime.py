@@ -61,14 +61,28 @@ class Runner:
                     session.add(Setting(key="contacts", value=self.config.contact_text))
 
     def ingest(self, updates):
+        if not isinstance(updates, list):
+            raise BaleError(502)
+        received = {}
+        invalid = 0
+        for update in updates:
+            identifier = update.get("update_id") if isinstance(update, dict) else None
+            if type(identifier) is not int or not 0 <= identifier < 2 ** 63 - 1:
+                invalid += 1
+            else:
+                received.setdefault(identifier, update)
+        if invalid:
+            logger.warning("Ignored %s malformed incoming updates; payload withheld", invalid)
+            if not received:
+                raise BaleError(502)
         with self.sessions.begin() as session:
             cursor = session.get(Setting, "poll_offset")
             offset = int(cursor.value) if cursor else 0
-            for update in updates:
-                identifier = update["update_id"]
-                if session.get(Inbox, identifier) is None:
+            for identifier, update in received.items():
+                if identifier >= offset and session.get(Inbox, identifier) is None:
                     session.add(Inbox(update_id=identifier, payload=update))
-                offset = max(offset, identifier + 1)
+            if received:
+                offset = max(offset, max(received) + 1)
             if cursor:
                 cursor.value = str(offset)
             else:
@@ -204,7 +218,7 @@ class Runner:
                 if self.stopping:
                     break
                 updates = self.api.call("getUpdates", {"offset": self.offset(), "timeout": 2, "limit": 100})
-                self.ingest(updates or [])
+                self.ingest(updates)
                 if not ready:
                     logger.info("Bot started in long polling mode (getUpdates succeeded)")
                     ready = True
@@ -224,6 +238,8 @@ class Runner:
             except BaleError as error:
                 if error.code == 401:
                     raise RuntimeError("توکن ربات نامعتبر یا لغو شده است.") from None
+                if error.code in (400, 403, 404):
+                    raise RuntimeError(f"Bale polling rejected: getUpdates ({error.code})") from None
                 if error.code == 409:
                     logger.warning("Bale getUpdates conflict (409); check for another instance using this token or an active webhook")
                 else:

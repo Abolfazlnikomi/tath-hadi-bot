@@ -136,6 +136,12 @@ class MeetingTests(unittest.TestCase):
         self.send(103, REFRESH_BUTTON)
         self.assertEqual(self.last(103)["reply_markup"], {"remove_keyboard": True})
 
+    def test_refresh_accepts_existing_keyboard_labels(self):
+        for label in ("🔄 به‌روزرسانی", "بروزرسانی بات", "به روز رساني بات", "/refresh"):
+            with self.subTest(label=label):
+                self.send(101, label)
+                self.assertIn("منوی شما به‌روز شد", self.last(101)["text"])
+
     def test_initialize_upgrades_legacy_classrooms(self):
         engine = create_engine("sqlite://")
         self.addCleanup(engine.dispose)
