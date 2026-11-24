@@ -2,8 +2,9 @@ import logging
 import signal
 import time
 from datetime import timedelta
+from traceback import extract_tb
 
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
 from .api import BaleAPI, BaleError
@@ -14,6 +15,15 @@ from .models import Base, Conversation, Inbox, LoginThrottle, Outbox, Setting, u
 
 
 logger = logging.getLogger("schoolbot")
+SCHEMA_VERSION = "2"
+
+
+def error_location(error):
+    for frame in reversed(extract_tb(error.__traceback__)):
+        path = frame.filename.replace("\\", "/")
+        if "/schoolbot/" in path:
+            return f"{type(error).__name__} at {path.rsplit('/', 1)[-1]}:{frame.lineno}"
+    return type(error).__name__
 
 
 class Runner:
@@ -35,12 +45,20 @@ class Runner:
                 self.lock_connection.close()
                 self.lock_connection = None
                 raise RuntimeError("یک نمونه دیگر ربات به این پایگاه داده متصل است.")
-        Base.metadata.create_all(self.engine)
-        with self.sessions.begin() as session:
-            if session.get(Setting, "schema_version") is None:
-                session.add(Setting(key="schema_version", value="1"))
-            if session.get(Setting, "contacts") is None:
-                session.add(Setting(key="contacts", value=self.config.contact_text))
+        with self.engine.begin() as connection:
+            Base.metadata.create_all(connection)
+            existing = {column["name"] for column in inspect(connection).get_columns("classrooms")}
+            for column in ("instructor", "location", "schedule"):
+                if column not in existing:
+                    connection.exec_driver_sql(f"ALTER TABLE classrooms ADD COLUMN {column} VARCHAR(200)")
+            with self.sessions(bind=connection) as session, session.begin():
+                version = session.get(Setting, "schema_version")
+                if version is None:
+                    session.add(Setting(key="schema_version", value=SCHEMA_VERSION))
+                elif version.value == "1":
+                    version.value = SCHEMA_VERSION
+                if session.get(Setting, "contacts") is None:
+                    session.add(Setting(key="contacts", value=self.config.contact_text))
 
     def ingest(self, updates):
         with self.sessions.begin() as session:
@@ -78,7 +96,7 @@ class Runner:
         except Exception as error:
             if identifier is None:
                 raise
-            logger.error("Update %s failed (%s); payload withheld", identifier, type(error).__name__)
+            logger.error("Update %s failed (%s); payload withheld", identifier, error_location(error))
             with self.sessions.begin() as session:
                 inbox = session.get(Inbox, identifier)
                 if not isinstance(error, BaleError) or error.code != 429:
@@ -143,14 +161,14 @@ class Runner:
         self.stopping = True
 
     def close(self):
-        self.api.close()
-        if self.lock_connection is not None:
+        try:
+            self.api.close()
+        finally:
             try:
-                self.lock_connection.execute(text("SELECT pg_advisory_unlock(1891614962)"))
-                self.lock_connection.commit()
+                if self.lock_connection is not None:
+                    self.lock_connection.close()
             finally:
-                self.lock_connection.close()
-        self.engine.dispose()
+                self.engine.dispose()
 
     def run(self):
         self.initialize()
@@ -208,7 +226,7 @@ def main():
         logger.error("%s", error)
         raise SystemExit(1) from None
     except Exception as error:
-        logger.error("Fatal error (%s); check database/server availability", type(error).__name__)
+        logger.error("Fatal error (%s); check database/server availability", error_location(error))
         raise SystemExit(1) from None
     finally:
         if runner:

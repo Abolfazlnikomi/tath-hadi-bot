@@ -84,17 +84,16 @@ def apply_import(session, pending):
     return count
 
 # توابع جدید برای مدیریت عدم حضور
-def register_absence(session, student_id: int, classroom_id: int, date_str: str, reason: str = ""):
+def register_absence(session, student_id: int, classroom_id: int, absence_date: date, reason: str | None = None):
     """ثبت یک درخواست عدم حضور جدید در دیتابیس"""
     req = AbsenceRequest(
         student_id=student_id,
         classroom_id=classroom_id,
-        absence_date=date_str,
+        absence_date=absence_date,
         reason=reason,
         created_at=utcnow(),
     )
     session.add(req)
-    session.commit()
     return req
 
 def get_pending_absences(session):
@@ -103,5 +102,6 @@ def get_pending_absences(session):
         select(AbsenceRequest)
         .join(Student, AbsenceRequest.student_id == Student.id)
         .join(Classroom, AbsenceRequest.classroom_id == Classroom.id)
+        .where(AbsenceRequest.status == "pending")
         .order_by(AbsenceRequest.id.desc())
     ))

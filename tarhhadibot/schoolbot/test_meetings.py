@@ -5,13 +5,13 @@ from io import BytesIO
 
 import jdatetime
 from openpyxl import load_workbook
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select
 
 from . import excel
 from .bot import REFRESH_BUTTON
 from .config import Config
 from .meetings import TEHRAN, schedule_reminders
-from .models import Classroom, Conversation, Enrollment, Meeting, MeetingInvite, Outbox, Setting, Student, utcnow
+from .models import AbsenceRequest, Classroom, Conversation, Enrollment, Meeting, MeetingInvite, Outbox, Setting, Student, utcnow
 from .runtime import Runner
 
 
@@ -135,3 +135,36 @@ class MeetingTests(unittest.TestCase):
         self.assertNotIn("👥 مدیریت ادمین‌ها", buttons(101))
         self.send(103, REFRESH_BUTTON)
         self.assertEqual(self.last(103)["reply_markup"], {"remove_keyboard": True})
+
+    def test_initialize_upgrades_legacy_classrooms(self):
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE classrooms (id INTEGER PRIMARY KEY, title VARCHAR(200) UNIQUE NOT NULL)")
+            connection.exec_driver_sql("INSERT INTO classrooms (id, title) VALUES (1, 'Legacy class')")
+        runner = Runner(self.runner.config, self.api, engine)
+        runner.initialize()
+        runner.initialize()
+        with runner.sessions() as session:
+            room = session.get(Classroom, 1)
+            self.assertEqual(room.title, "Legacy class")
+            self.assertEqual((room.instructor, room.location, room.schedule), (None, None, None))
+            self.assertEqual(session.get(Setting, "schema_version").value, "2")
+        self.assertTrue(inspect(engine).has_table("meeting_invites"))
+
+    def test_absence_confirmation_and_excel(self):
+        self.send(101, callback=f"absence_cls:{self.room_id}")
+        self.send(101, "فردا")
+        self.send(101, "بیماری")
+        confirmation = self.last(101)["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+        self.send(101, callback=confirmation)
+        self.send(101, callback=confirmation)
+        with self.runner.sessions() as session:
+            absence = session.scalars(select(AbsenceRequest)).one()
+            self.assertEqual(absence.student_id, self.student_ids[0])
+            self.assertEqual(absence.reason, "بیماری")
+        admin = self.runner.config.admin_id
+        self.send(admin, "📋 گزارش درخواست‌های عدم حضور")
+        report = load_workbook(BytesIO(base64.b64decode(self.last(admin, "sendDocument")["_file"]["content"])))
+        self.assertEqual(report.active["C2"].value, "0012345678")
+        report.close()

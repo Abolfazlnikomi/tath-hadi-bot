@@ -3,11 +3,11 @@
   <component name="ChangeListManager">
     <list default="true" id="df18c4f6-24ab-44b1-ad50-7a1ea56a0574" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/MEETINGS.md" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/MEETINGS.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/bot.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/excel.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/excel.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/features.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/features.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/models.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/models.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/runtime.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/runtime.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/service.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/service.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/test_meetings.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/test_meetings.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -43,10 +43,22 @@
       <workItem from="1793216857851" duration="8000" />
       <workItem from="1795470524444" duration="1297000" />
       <workItem from="1795500674252" duration="3084000" />
+      <workItem from="1795545797362" duration="2117000" />
     </task>
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
   </component>
 </project>

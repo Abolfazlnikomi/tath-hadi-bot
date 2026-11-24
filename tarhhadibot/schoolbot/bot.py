@@ -214,7 +214,12 @@ class Bot(MeetingsMixin):
         if action == "absence_cls" and len(parts) == 2 and parts[1].isdigit():
             classroom_id = int(parts[1])
             classroom = session.get(Classroom, classroom_id)
-            if not classroom:
+            student_id = session.scalar(select(Student.id).where(
+                Student.bale_user_id == user_id, Student.chat_id == chat_id, Student.active.is_(True),
+            ))
+            if not self.allow(session, chat_id, ["absence"]):
+                return
+            if not classroom or student_id is None or not session.get(Enrollment, (classroom_id, student_id)):
                 self.say(session, chat_id, "کلاس یافت نشد.")
                 return
             self.set_state(state, mode="absence_date", classroom_id=classroom.id, classroom_title=classroom.title)
@@ -231,10 +236,14 @@ class Bot(MeetingsMixin):
                 self.say(session, chat_id, "این درخواست منقضی شده یا قبلاً ثبت شده است.")
                 return
             if state.data.get("mode") == "confirm_absence":
+                if not self.allow(session, chat_id, ["absence"]):
+                    return
                 from datetime import date as dt_date
                 absence_d = dt_date.fromisoformat(state.data["absence_date"])
-                student = session.scalar(select(Student).where(Student.bale_user_id == user_id, Student.active.is_(True)))
-                if not student:
+                student = session.scalar(select(Student).where(
+                    Student.bale_user_id == user_id, Student.chat_id == chat_id, Student.active.is_(True),
+                ))
+                if not student or not session.get(Enrollment, (state.data["classroom_id"], student.id)):
                     self.say(session, chat_id, "اطلاعات دانش‌آموز یافت نشد.")
                     self.set_state(state)
                     return
@@ -478,7 +487,7 @@ class Bot(MeetingsMixin):
             if not requests:
                 self.say(session, chat_id, "در حال حاضر هیچ درخواست عدم حضور بررسی‌نشده‌ای وجود ندارد.")
                 return
-            content = excel.generate_absence_report(requests)
+            content = excel.export_absences_excel(requests)
             current_date, jalali = excel.today()
             self.queue(session, "sendDocument", {
                 "chat_id": chat_id,
