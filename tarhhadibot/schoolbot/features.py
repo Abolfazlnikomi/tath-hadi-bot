@@ -1,6 +1,10 @@
 from .models import Setting
 
 
+COINS_ADMIN_BUTTON = "🪙 امتیازات"
+COINS_STUDENT_BUTTON = "🪙 سکه‌های هادی"
+
+
 FEATURES = {
     "students": "مدیریت و بارگذاری کاربران",
     "attendance": "حضور و غیاب",
@@ -11,6 +15,7 @@ FEATURES = {
     "broadcast": "ارسال پیام همگانی و کلاسی",
     "contacts": "راه‌های ارتباطی",
     "meetings": "جلسات و یادآوری",
+    "coins": "امتیازات و سکه‌های هادی",
 }
 
 TEXT_FEATURES = {
@@ -25,6 +30,8 @@ TEXT_FEATURES = {
     "📢 پیام همگانی": "broadcast",
     "👤 مدیریت دانش‌آموز": "students",
     "🎁 نام بخش تخفیف/رکوردها": "discounts",
+    COINS_ADMIN_BUTTON: "coins",
+    COINS_STUDENT_BUTTON: "coins",
 }
 
 
@@ -36,6 +43,8 @@ def enabled(session, feature):
 def callback_features(data):
     parts = data.split(":")
     action = parts[0]
+    if action == "coins":
+        return ["coins", "excel"] if parts[1:2] == ["report"] else ["coins"]
     if action in ("upload", "export", "template") and len(parts) == 3:
         return ["excel", parts[1]]
     return {
@@ -53,6 +62,8 @@ def callback_features(data):
 
 def state_features(data):
     mode = data.get("mode", "")
+    if mode.startswith("coins_"):
+        return ["coins"]
     if mode == "upload":
         return ["excel", data["kind"]]
     if mode == "confirm_import":

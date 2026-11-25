@@ -1,8 +1,8 @@
 from datetime import date, datetime, timezone
 
 from sqlalchemy import (
-    JSON, BigInteger, Boolean, Date, DateTime, ForeignKey, Integer,
-    String, Text, UniqueConstraint,
+    JSON, BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index,
+    Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -83,6 +83,33 @@ class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[str] = mapped_column(Text)
+
+
+MAX_COINS_PER_AWARD = 100000
+
+
+class CoinCategory(Base):
+    __tablename__ = "coin_categories"
+    __table_args__ = (CheckConstraint(f"amount BETWEEN 1 AND {MAX_COINS_PER_AWARD}"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(80), unique=True)
+    amount: Mapped[int] = mapped_column(Integer)
+
+
+class CoinAward(Base):
+    __tablename__ = "coin_awards"
+    __table_args__ = (
+        CheckConstraint(f"amount BETWEEN 1 AND {MAX_COINS_PER_AWARD}"),
+        Index("ix_coin_awards_classroom_student", "classroom_id", "student_id"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    classroom_id: Mapped[int] = mapped_column(ForeignKey("classrooms.id"))
+    student_id: Mapped[int] = mapped_column(ForeignKey("students.id"), index=True)
+    category_id: Mapped[int] = mapped_column(ForeignKey("coin_categories.id"))
+    category_title: Mapped[str] = mapped_column(String(80))
+    amount: Mapped[int] = mapped_column(Integer)
+    actor_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Meeting(Base):

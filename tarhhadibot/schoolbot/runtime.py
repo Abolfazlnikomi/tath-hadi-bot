@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from .api import BaleAPI, BaleError
 from .bot import Bot
+from .coins import valid_coin_delivery
 from .config import Config
 from .meetings import schedule_reminders, valid_delivery
 from .models import Base, Conversation, Inbox, LoginThrottle, Outbox, Setting, utcnow
@@ -135,7 +136,9 @@ class Runner:
             ).limit(1))
             if message is None:
                 return False
-            if (message.dedupe_key or "").startswith("meeting:") and not valid_delivery(session, message, utcnow()):
+            key = message.dedupe_key or ""
+            if ((key.startswith("meeting:") and not valid_delivery(session, message, utcnow()))
+                    or (key.startswith("coins:") and not valid_coin_delivery(session, message))):
                 message.status = "expired"
                 message.payload = {}
                 return True

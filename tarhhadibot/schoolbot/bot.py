@@ -7,7 +7,10 @@ from sqlalchemy import func, select
 
 from . import excel
 from .api import BaleError
-from .features import FEATURES, TEXT_FEATURES, callback_features, enabled, state_features
+from .coins import CoinsMixin
+from .features import (
+    COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, FEATURES, TEXT_FEATURES, callback_features, enabled, state_features,
+)
 from .meetings import MeetingsMixin
 from .models import (
     Attendance, Audit, Classroom, Conversation, Discount, Enrollment, LoginThrottle, Outbox, Setting, Student, utcnow,
@@ -27,6 +30,7 @@ STUDENT_MENU = [
     ["📋 حضور و غیاب من", "🏫 کلاس‌های من"],
     ["📝 ثبت عدم حضور", "🎁 تخفیف‌های من"],
     ["☎️ راه‌های ارتباطی"],
+    [COINS_STUDENT_BUTTON],
     ["📅 جلسات من", REFRESH_BUTTON],
 ]
 ADMIN_MENU = [
@@ -36,6 +40,7 @@ ADMIN_MENU = [
     ["⚙️ امکانات بات", "⚙️ تنظیم راه‌های ارتباطی"],
     ["👥 مدیریت ادمین‌ها", "🎁 نام بخش تخفیف/رکوردها"],
     ["☎️ راه‌های ارتباطی", "لغو"],
+    [COINS_ADMIN_BUTTON],
     ["📅 جلسات", REFRESH_BUTTON],
 ]
 
@@ -49,7 +54,7 @@ def reply(admin=False):
             "resize_keyboard": True}
 
 
-class Bot(MeetingsMixin):
+class Bot(MeetingsMixin, CoinsMixin):
     def __init__(self, config, api):
         self.config = config
         self.api = api
@@ -184,6 +189,9 @@ class Bot(MeetingsMixin):
             if data.startswith("mt:"):
                 self.meeting_admin_callback(session, chat_id, user_id, state, data)
                 return
+            if data.startswith("coins:"):
+                self.coins_callback(session, chat_id, user_id, state, data)
+                return
             self.callback(session, chat_id, user_id, state, data)
             return
         raw_text = message.get("text")
@@ -315,6 +323,11 @@ class Bot(MeetingsMixin):
             self.say(session, chat_id, f"{student.full_name} عزیز، خوش آمدید.", self.menu(session))
             return
 
+        if text == COINS_STUDENT_BUTTON:
+            if student.chat_id == chat_id:
+                self.set_state(state)
+                self.coins_balance(session, chat_id, student.id)
+            return
         if text == "📅 جلسات من":
             self.set_state(state)
             if student.chat_id == chat_id:
@@ -468,6 +481,8 @@ class Bot(MeetingsMixin):
             [(f"اکسل {title}", f"export:discounts:{identifier}")],
             [(f"بارگذاری {title}", f"upload:discounts:{identifier}")],
             [(f"ثبت رکورد در {title}", f"record:{identifier}")],
+            [("🪙 ثبت سکه", f"coins:categories:{identifier}:0"),
+             ("📥 اکسل سکه‌ها", f"coins:report:{identifier}")],
             [("ارسال پیام به کلاس", f"broadcast:{identifier}")],
             [("حذف عضویت دانش‌آموز", f"remove:{identifier}")],
         ]
@@ -484,6 +499,9 @@ class Bot(MeetingsMixin):
         self.say(session, chat_id, info_text, inline([row for row in rows if row]))
 
     def admin_message(self, session, chat_id, user_id, state, message, text):
+        if text == COINS_ADMIN_BUTTON:
+            self.coins_menu(session, chat_id, state)
+            return
         if text == "📅 جلسات":
             self.set_state(state)
             self.meeting_list(session, chat_id)
@@ -557,6 +575,9 @@ class Bot(MeetingsMixin):
         mode = state.data.get("mode")
         if not self.allow(session, chat_id, state_features(state.data)):
             self.set_state(state)
+            return
+        if mode and mode.startswith("coins_"):
+            self.coins_admin_message(session, chat_id, user_id, state, text)
             return
         if mode == "admin_add":
             if user_id != self.config.admin_id:
@@ -794,7 +815,7 @@ class Bot(MeetingsMixin):
             self.audit(session, user_id, "update_feature", feature=parts[1], enabled=parts[2] == "1")
             self.set_state(state)
             session.flush()
-            if parts[1] in ("attendance", "discounts", "contacts"):
+            if parts[1] in ("attendance", "discounts", "contacts", "coins"):
                 self.refresh_student_menus(session)
             self.feature_menu(session, chat_id)
             self.home(session, chat_id, True, user_id)

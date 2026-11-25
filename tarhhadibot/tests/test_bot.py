@@ -1,3 +1,4 @@
+import base64
 import os
 import unittest
 from datetime import timedelta
@@ -11,8 +12,10 @@ from schoolbot import excel
 from schoolbot.api import BaleError
 from schoolbot.bot import REFRESH_BUTTON
 from schoolbot.config import Config
+from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON
 from schoolbot.models import (
-    Attendance, Base, Classroom, Conversation, Discount, Enrollment, Inbox, Outbox, Setting, Student, utcnow,
+    Attendance, Base, Classroom, CoinAward, CoinCategory, Conversation, Discount, Enrollment,
+    Inbox, Outbox, Setting, Student, utcnow,
 )
 from schoolbot.runtime import Runner
 from schoolbot.service import apply_import
@@ -128,6 +131,125 @@ class BotTests(unittest.TestCase):
             row.update(code="OFF-20", description="دوره اول")
         return {"kind": kind, "classroom_id": self.class_id,
                 "session_date": excel.today()[0].isoformat(), "rows": [row]}
+
+    def coin_category(self, amount="۱۵"):
+        self.callback("coins:new")
+        self.message("فعالیت كلاسی", user=self.config.admin_id)
+        self.message(amount, user=self.config.admin_id)
+        with self.sessions() as session:
+            return session.scalar(select(CoinCategory.id))
+
+    def coin_preview(self, category_id):
+        self.callback(f"coins:preview:{self.class_id}:{category_id}:{self.student_id}")
+        return "coins:confirm:" + self.current_nonce()
+
+    def test_coins_navigation_award_balance_and_notification(self):
+        self.message("0012345678")
+        self.assertIn(COINS_STUDENT_BUTTON, self.button_texts(self.last_payload_for(25)))
+        self.message(COINS_STUDENT_BUTTON)
+        self.assertIn("شما: 0", self.latest_text())
+        self.message(COINS_ADMIN_BUTTON, user=self.config.admin_id)
+
+        def click(label):
+            rows = self.last_payload_for(self.config.admin_id)["reply_markup"]["inline_keyboard"]
+            self.callback(next(button["callback_data"] for row in rows for button in row if label in button["text"]))
+
+        click("ایجاد بخش امتیاز")
+        self.message("فعالیت كلاسی", user=self.config.admin_id)
+        self.message("۰", user=self.config.admin_id)
+        with self.sessions() as session:
+            self.assertIsNone(session.scalar(select(CoinCategory.id)))
+        self.message("۱۵", user=self.config.admin_id)
+        click("مدیریت امتیازات")
+        click("ثبت امتیاز و گزارش کلاس‌ها")
+        click("ریاضی")
+        click("ثبت امتیاز")
+        click("فعالیت کلاسی")
+        click("0012345678")
+        confirm = "coins:confirm:" + self.current_nonce()
+        click("تأیید ثبت")
+        self.callback(confirm)
+        notice = self.last_payload_for(25)
+        self.assertIn("برای شما 15 سکه", notice["text"])
+        self.message(COINS_STUDENT_BUTTON)
+        self.assertIn("شما: 15", self.latest_text())
+        self.assertIn("فعالیت کلاسی | ریاضی", self.latest_text())
+        with self.sessions() as session:
+            award = session.scalars(select(CoinAward)).one()
+            self.assertEqual((award.amount, award.actor_id), (15, self.config.admin_id))
+            self.assertEqual(session.scalar(select(func.count()).select_from(Outbox).where(
+                Outbox.dedupe_key.startswith("coins:"),
+            )), 1)
+        while self.runner.deliver_one():
+            pass
+        self.assertIn(("sendMessage", notice), self.api.calls)
+
+    def test_coins_recheck_amount_membership_and_feature_and_keep_history(self):
+        category_id = self.coin_category()
+        self.add_admin()
+        self.callback(self.coin_preview(category_id))
+        stale = self.coin_preview(category_id)
+        self.callback(f"coins:edit:{category_id}", user=26)
+        self.message("۳۰", user=26)
+        self.callback(stale)
+        self.assertIn("تغییر کرده", self.latest_text())
+        self.callback(self.coin_preview(category_id))
+        blocked = self.coin_preview(category_id)
+        self.callback("feature:coins:0", user=26)
+        self.callback(blocked)
+        self.assertIn("غیرفعال", self.latest_text())
+        self.callback("feature:coins:1", user=26)
+        invalid = self.coin_preview(category_id)
+        with self.sessions.begin() as session:
+            session.delete(session.get(Enrollment, (self.class_id, self.student_id)))
+        self.callback(invalid)
+        self.assertIn("عضو فعال", self.latest_text())
+        with self.sessions() as session:
+            self.assertEqual(list(session.scalars(select(CoinAward.amount).order_by(CoinAward.id))), [15, 30])
+            self.assertIsNone(session.scalar(select(Outbox.id).where(Outbox.dedupe_key.startswith("coins:"))))
+
+    def test_coins_report_is_class_scoped_and_safe_for_excel(self):
+        category_id = self.coin_category()
+        self.callback(self.coin_preview(category_id))
+        with self.sessions.begin() as session:
+            session.get(Student, self.student_id).full_name = "=1+1"
+            session.delete(session.get(Enrollment, (self.class_id, self.student_id)))
+            other = Classroom(title="کلاس دیگر")
+            zero = Student(national_id="0000000000", full_name="عضو بدون سکه", phone="")
+            session.add_all([other, zero])
+            session.flush()
+            session.add(Enrollment(classroom_id=self.class_id, student_id=zero.id))
+            session.add(CoinAward(classroom_id=other.id, student_id=self.student_id, category_id=category_id,
+                                  category_title="فعالیت کلاسی", amount=60, actor_id=self.config.admin_id))
+        self.callback(f"coins:report:{self.class_id}", user=25)
+        self.assertIn("دسترسی مجاز نیست", self.latest_text())
+        with self.sessions() as session:
+            self.assertIsNone(session.scalar(select(Outbox.id).where(Outbox.method == "sendDocument")))
+        self.callback(f"coins:report:{self.class_id}")
+        with self.sessions() as session:
+            file = session.scalars(select(Outbox).where(Outbox.method == "sendDocument")).one().payload["_file"]
+        book = load_workbook(BytesIO(base64.b64decode(file["content"])))
+        summary = book["خلاصه سکه‌ها"]
+        rows = {row[0].value: row for row in summary.iter_rows(min_row=2)}
+        self.assertEqual(rows["0012345678"][1].data_type, "s")
+        self.assertEqual([cell.value for cell in rows["0012345678"]], ["0012345678", "=1+1", "عضو سابق", 15])
+        self.assertEqual([cell.value for cell in rows["0000000000"]], ["0000000000", "عضو بدون سکه", "فعال", 0])
+        self.assertEqual(book["ریز امتیازات"].max_row, 2)
+        self.assertEqual(book["ریز امتیازات"]["D2"].value, 15)
+
+    def test_coin_notices_do_not_reach_an_unlinked_account(self):
+        self.message("0012345678")
+        self.callback(self.coin_preview(self.coin_category()))
+        with self.sessions.begin() as session:
+            student = session.get(Student, self.student_id)
+            student.bale_user_id = None
+            student.chat_id = None
+        while self.runner.deliver_one():
+            pass
+        with self.sessions() as session:
+            notice = session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("coins:"))).one()
+            self.assertEqual((notice.status, notice.payload), ("expired", {}))
+        self.assertFalse(any("برای شما 15 سکه" in payload.get("text", "") for _, payload in self.api.calls))
 
     def test_login_persian_digits(self):
         self.message("۰۰۱۲۳۴۵۶۷۸")
@@ -279,6 +401,8 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("🎁 تخفیف‌های من", self.button_texts(self.last_payload_for(25)))
         self.callback("feature:attendance:0")
         self.callback("feature:contacts:0")
+        self.assertIn(COINS_STUDENT_BUTTON, self.button_texts(self.last_payload_for(25)))
+        self.callback("feature:coins:0")
         remaining = ["🏫 کلاس‌های من", "📝 ثبت عدم حضور", "📅 جلسات من", REFRESH_BUTTON]
         self.assertEqual(self.button_texts(self.last_payload_for(25)), remaining)
         self.message("🎁 تخفیف‌های من")
