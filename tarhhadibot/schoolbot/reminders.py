@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, func, select, update
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .api import BaleError
 from .education_access import ID_MAX, identifiers
 from .education_models import GuardianAccount, GuardianLink
 from .features import enabled
@@ -16,6 +17,8 @@ from .preferences import is_admin
 
 
 AUDIENCES = {"students": "دانش‌آموزان", "parents": "اولیا"}
+PHOTO_LIMIT = 2 * 1024 * 1024
+PHOTO_CAPTION_LIMIT = 1024
 
 
 class SmartReminder(Base):
@@ -82,7 +85,7 @@ class SmartRemindersMixin:
         mode = draft.get("mode")
         if action == "menu" and not args:
             self.set_state(state)
-            rows = [[("✍️ پیام یا یادآوری متنی", "sr:new")]]
+            rows = [[("✍️ پیام یا یادآوری متنی و تصویری", "sr:new")]]
             if enabled(session, "meetings"):
                 rows.append([("📅 یادآوری جلسهٔ والدین", "sr:meetings:0")])
             rows.append([("📋 سوابق و لغو ارسال", "sr:history:0")])
@@ -164,18 +167,46 @@ class SmartRemindersMixin:
     def reminder_body_prompt(self, session, chat_id, state, audience):
         draft = state.data
         self.set_state(state, **{**draft, "audience": audience, "mode": "reminder_body"})
-        self.say(session, chat_id, "متن یادآوری را بفرستید (حداکثر ۱۲۰۰ نویسه)."
+        self.say(session, chat_id, "متن یادآوری (حداکثر ۱۲۰۰ نویسه) یا یک عکس تا ۲ مگابایت، با یا بدون کپشن، بفرستید."
                  + ("\nبرای ارسال فقط اطلاعات جلسه، «-» بفرستید." if draft.get("meeting_id") else ""))
 
-    def reminder_message(self, session, chat_id, state, text):
+    def reminder_message(self, session, chat_id, state, message, text):
         if not self.allow(session, chat_id, ["reminders"]):
             return
         draft = state.data
         if draft["mode"] == "reminder_body":
-            if not 1 <= len(text) <= 1200 or any(ord(char) < 32 and char not in "\r\n\t" for char in text):
-                self.say(session, chat_id, "متن معتبر بین ۱ تا ۱۲۰۰ نویسه بفرستید.")
+            photo_id = None
+            if "photo" in message:
+                photos = message["photo"]
+                photo = photos[-1] if isinstance(photos, list) and photos else None
+                photo_id = photo.get("file_id") if isinstance(photo, dict) else None
+                size = photo.get("file_size") if isinstance(photo, dict) else None
+                if not isinstance(photo_id, str) or not 1 <= len(photo_id) <= 512 or (
+                    type(size) is int and size > PHOTO_LIMIT
+                ):
+                    self.say(session, chat_id, "یک عکس معتبر با حجم حداکثر ۲ مگابایت بفرستید.")
+                    return
+                caption = message.get("caption")
+                text = caption.strip() if isinstance(caption, str) else ""
+            if (not (text or photo_id) or len(text) > 1200
+                    or any(ord(char) < 32 and char not in "\r\n\t" for char in text)):
+                self.say(session, chat_id, "متن معتبر (حداکثر ۱۲۰۰ نویسه) یا یک عکس تا ۲ مگابایت بفرستید.")
                 return
-            self.set_state(state, **{**draft, "mode": "reminder_time", "body": text})
+            draft = {**draft, "body": text, "photo_id": photo_id}
+            if photo_id:
+                if self.reminder_content(session, chat_id, draft, None) is None:
+                    return
+                try:
+                    self.api.validate_photo(photo_id, PHOTO_LIMIT)
+                except ValueError:
+                    self.say(session, chat_id, "یک عکس معتبر با حجم حداکثر ۲ مگابایت بفرستید.")
+                    return
+                except BaleError as error:
+                    if error.code not in (400, 403, 404):
+                        raise
+                    self.say(session, chat_id, "دریافت عکس انجام نشد؛ دوباره بفرستید.")
+                    return
+            self.set_state(state, **{**draft, "mode": "reminder_time"})
             self.say(session, chat_id, "ارسال فوری را بزنید یا زمان ارسال را وارد کنید.\n" + time_prompt(),
                      keyboard([[("ارسال فوری", "sr:now"), ("لغو", "cancel")]]))
         elif draft["mode"] == "reminder_time":
@@ -191,20 +222,23 @@ class SmartRemindersMixin:
             self.say(session, chat_id, "برای ادامه از دکمه‌های پیام قبلی استفاده کنید.")
 
     def reminder_content(self, session, chat_id, draft, send_at):
-        body = "🔔 یادآوری\n\n" + draft["body"]
-        if draft.get("meeting_id") is None:
-            return body, None
-        meeting = active_reminder_meeting(session, draft["meeting_id"], draft["revision"], utcnow())
-        if meeting is None:
-            self.say(session, chat_id, "جلسه تغییر کرده یا در دسترس نیست؛ دوباره انتخاب کنید.")
-            return None
-        if send_at is not None and send_at >= utc(meeting.starts_at):
-            self.say(session, chat_id, "زمان ارسال باید قبل از شروع جلسه باشد.")
-            return None
-        body = "🔔 یادآوری جلسهٔ والدین\n\n" + detail(session, meeting, include_classrooms=False)
-        if draft["body"] != "-":
+        body, markup = "🔔 یادآوری", None
+        if draft.get("meeting_id") is not None:
+            meeting = active_reminder_meeting(session, draft["meeting_id"], draft["revision"], utcnow())
+            if meeting is None:
+                self.say(session, chat_id, "جلسه تغییر کرده یا در دسترس نیست؛ دوباره انتخاب کنید.")
+                return None
+            if send_at is not None and send_at >= utc(meeting.starts_at):
+                self.say(session, chat_id, "زمان ارسال باید قبل از شروع جلسه باشد.")
+                return None
+            body = "🔔 یادآوری جلسهٔ والدین\n\n" + detail(session, meeting, include_classrooms=False)
+            markup = keyboard([[("مشاهده جلسه", f"pf:view:{meeting.id}")]])
+        if draft["body"] and not (markup and draft["body"] == "-"):
             body += "\n\n" + draft["body"]
-        return body, keyboard([[("مشاهده جلسه", f"pf:view:{meeting.id}")]])
+        if draft.get("photo_id") and len(body.encode("utf-16-le")) // 2 > PHOTO_CAPTION_LIMIT:
+            self.say(session, chat_id, "کپشن با عنوان و اطلاعات یادآوری طولانی است؛ عکس را با کپشن کوتاه‌تری بفرستید.")
+            return None
+        return body, markup
 
     def reminder_preview(self, session, chat_id, state, send_at):
         draft = state.data
@@ -220,7 +254,8 @@ class SmartRemindersMixin:
                                  "send_at": send_at.isoformat() if send_at else None})
         titles = list(session.scalars(select(Classroom.title).where(Classroom.id.in_(draft["classrooms"])).order_by(Classroom.id)))
         self.say(session, chat_id, f"کلاس‌ها: {'، '.join(titles)}\nمخاطب: {AUDIENCES[draft['audience']]} | {len(targets)} گیرنده"
-                 f"\nزمان: {local_time(send_at) if send_at else 'فوری'}\n\n{content[0]}",
+                 f"\nزمان: {local_time(send_at) if send_at else 'فوری'}"
+                 + ("\nپیوست: عکس" if draft.get("photo_id") else "") + f"\n\n{content[0]}",
                  keyboard([[("تأیید نهایی ارسال", f"sr:save:{nonce}"), ("لغو", "cancel")]]))
 
     def reminder_save(self, session, chat_id, user_id, state):
@@ -243,10 +278,15 @@ class SmartRemindersMixin:
         session.add(reminder)
         session.flush()
         for account, target_chat in targets:
-            payload = {"chat_id": target_chat, "text": content[0]}
+            if draft.get("photo_id"):
+                method = "sendPhoto"
+                payload = {"chat_id": target_chat, "photo": draft["photo_id"], "caption": content[0]}
+            else:
+                method = "sendMessage"
+                payload = {"chat_id": target_chat, "text": content[0]}
             if content[1] is not None:
                 payload["reply_markup"] = content[1]
-            session.add(Outbox(method="sendMessage", payload=payload, available_at=send_at,
+            session.add(Outbox(method=method, payload=payload, available_at=send_at,
                                dedupe_key=f"sr:{reminder.id}:{account}:{target_chat}"))
         self.audit(session, user_id, "smart_reminder", reminder_id=reminder.id, classroom_ids=draft["classrooms"],
                    audience=draft["audience"], recipients=len(targets))

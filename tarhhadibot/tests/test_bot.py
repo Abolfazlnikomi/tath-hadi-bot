@@ -19,7 +19,7 @@ from schoolbot.education_models import (
 from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, REMINDER_BUTTON
 from schoolbot.parent_meeting_models import MeetingSection, ParentMeeting, ParentMeetingClass
 from schoolbot.parent_meetings import local_time
-from schoolbot.reminders import SmartReminder
+from schoolbot.reminders import PHOTO_LIMIT, SmartReminder
 from schoolbot.models import (
     Attendance, Base, Classroom, CoinAward, CoinCategory, Conversation, Discount, Enrollment,
     Inbox, Outbox, Setting, Student, utcnow,
@@ -33,6 +33,8 @@ class FakeAPI:
         self.calls = []
         self.content = b""
         self.error = None
+        self.photo_sizes = {}
+        self.photo_checks = []
 
     def call(self, method, payload=None):
         if self.error:
@@ -42,6 +44,11 @@ class FakeAPI:
 
     def download(self, _document):
         return self.content
+
+    def validate_photo(self, file_id, limit):
+        self.photo_checks.append((file_id, limit))
+        if self.photo_sizes[file_id] > limit:
+            raise ValueError("Photo too large")
 
     def close(self):
         pass
@@ -189,6 +196,35 @@ class BotTests(unittest.TestCase):
         with self.sessions() as session:
             self.assertEqual(session.scalar(select(func.count()).select_from(SmartReminder)), 1)
 
+    def test_smart_reminder_photo_size_caption_and_scheduled_delivery(self):
+        owner = self.config.admin_id
+        self.message("0012345678")
+        self.callback("sr:new")
+        self.callback(f"sr:toggle:{self.class_id}:0")
+        self.callback("sr:next")
+        self.callback("sr:audience:students")
+        self.message(user=owner, photo=[{"file_id": "declared-large", "file_size": PHOTO_LIMIT + 1}])
+        self.assertIn("حداکثر ۲ مگابایت", self.latest_text())
+        self.assertEqual(self.api.photo_checks, [])
+        self.api.photo_sizes["actual-large"] = PHOTO_LIMIT + 1
+        self.message(user=owner, photo=[{"file_id": "actual-large", "file_size": 100}])
+        self.assertIn("حداکثر ۲ مگابایت", self.latest_text())
+        self.api.photo_sizes["accepted"] = PHOTO_LIMIT
+        self.message(user=owner, photo=[{"file_id": "accepted"}], caption="پوستر برنامه")
+        self.assertEqual(self.api.photo_checks, [("actual-large", PHOTO_LIMIT), ("accepted", PHOTO_LIMIT)])
+        self.message(local_time(utcnow() + timedelta(days=1)), user=owner)
+        self.assertIn("پیوست: عکس", self.latest_text())
+        self.callback("sr:save:" + self.current_nonce())
+        while self.runner.deliver_one():
+            pass
+        self.assertFalse(any(method == "sendPhoto" for method, _ in self.api.calls))
+        with self.sessions.begin() as session:
+            item = session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("sr:"))).one()
+            self.assertEqual(item.method, "sendPhoto")
+            item.available_at = utcnow() - timedelta(seconds=1)
+        self.assertTrue(self.runner.deliver_one())
+        self.assertIn(("sendPhoto", {"chat_id": 25, "photo": "accepted", "caption": "🔔 یادآوری\n\nپوستر برنامه"}), self.api.calls)
+
     def test_smart_reminder_scheduled_cancellation(self):
         owner = self.config.admin_id
         self.message("0012345678")
@@ -234,11 +270,14 @@ class BotTests(unittest.TestCase):
         self.callback(f"sr:pick:{meeting_id}")
         self.callback(f"sr:toggle:{self.class_id}:0")
         self.callback("sr:next")
-        self.message("-", user=owner)
+        self.api.photo_sizes["meeting-poster"] = 100
+        self.message(user=owner, photo=[{"file_id": "meeting-poster"}])
         self.callback("sr:now")
         self.callback("sr:save:" + self.current_nonce())
         with self.sessions.begin() as session:
             notice = session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("sr:"))).one()
+            self.assertEqual(notice.method, "sendPhoto")
+            self.assertIn("معارفه", notice.payload["caption"])
             self.assertEqual(notice.payload["chat_id"], 55)
             self.assertEqual(notice.payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"], f"pf:view:{meeting_id}")
             session.get(ParentMeeting, meeting_id).revision += 1

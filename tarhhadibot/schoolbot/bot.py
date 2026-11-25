@@ -580,7 +580,7 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
             self.reminder_callback(session, chat_id, user_id, state, "sr:menu")
             return
         if state.data.get("mode", "").startswith("reminder_"):
-            self.reminder_message(session, chat_id, state, text)
+            self.reminder_message(session, chat_id, state, message, text)
             return
         if text == COINS_ADMIN_BUTTON:
             self.coins_menu(session, chat_id, state)
