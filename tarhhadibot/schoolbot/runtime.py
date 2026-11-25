@@ -15,6 +15,7 @@ from .education_access import valid_education_delivery
 from .meetings import schedule_reminders, valid_delivery
 from .models import Base, Conversation, Inbox, LoginThrottle, Outbox, Setting, utcnow
 from .parent_meetings import parent_delivery_stage, schedule_parent_meetings
+from .reminders import valid_reminder_delivery
 
 
 logger = logging.getLogger("schoolbot")
@@ -152,6 +153,7 @@ class Runner:
             if ((key.startswith("pm:") and parent_stage is None)
                     or (key.startswith("meeting:") and not valid_delivery(session, message, utcnow()))
                     or (key.startswith("coins:") and not valid_coin_delivery(session, message))
+                    or (key.startswith("sr:") and not valid_reminder_delivery(session, message, utcnow(), self.config.admin_id))
                     or (key.startswith(("edview:", "edfamily:", "edfeedback:"))
                         and not valid_education_delivery(session, message, self.config.admin_id))):
                 message.status = "expired"

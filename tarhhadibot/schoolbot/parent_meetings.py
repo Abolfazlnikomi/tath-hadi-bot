@@ -37,10 +37,12 @@ def meeting_rooms(session, meeting_id):
     ).order_by(Classroom.id)))
 
 
-def detail(session, meeting):
-    titles = "، ".join(room.title for room in meeting_rooms(session, meeting.id))
-    return (f"بخش: {session.get(MeetingSection, meeting.section_id).title}\nموضوع: {meeting.topic}"
-            f"\nزمان: {local_time(meeting.starts_at)} (تهران)\nمکان: {meeting.location}\nکلاس‌ها: {titles}")
+def detail(session, meeting, include_classrooms=True):
+    text = (f"بخش: {session.get(MeetingSection, meeting.section_id).title}\nموضوع: {meeting.topic}"
+            f"\nزمان: {local_time(meeting.starts_at)} (تهران)\nمکان: {meeting.location}")
+    if include_classrooms:
+        text += "\nکلاس‌ها: " + "، ".join(room.title for room in meeting_rooms(session, meeting.id))
+    return text
 
 
 def eligible_links(meeting_id):
@@ -229,6 +231,8 @@ class ParentMeetingsMixin:
                                           f"parent-meeting-{meeting.id}.xlsx", "گزارش جامع حضور والدین")
             elif action == "view":
                 rows = [[("ویرایش", f"pm:edit:{meeting.id}"), ("حذف / لغو", f"pm:delete:{meeting.id}")]] if not meeting.cancelled else []
+                if not meeting.cancelled and utc(meeting.starts_at) > utcnow() and enabled(session, "reminders"):
+                    rows.append([("🔔 یادآوری هوشمند", f"sr:pick:{meeting.id}")])
                 if enabled(session, "excel"):
                     rows.append([("اکسل جامع پاسخ‌ها", f"pm:export:{meeting.id}")])
                 stages = list(session.scalars(select(ParentMeetingStage).where(

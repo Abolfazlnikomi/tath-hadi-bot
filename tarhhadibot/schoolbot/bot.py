@@ -11,7 +11,8 @@ from .coins import CoinsMixin
 from .education import EducationMixin
 from .education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, bound_student, mentor_active
 from .features import (
-    COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, FEATURES, TEXT_FEATURES, callback_features, enabled, state_features,
+    COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, FEATURES, REMINDER_BUTTON, TEXT_FEATURES, callback_features, enabled,
+    state_features,
 )
 from .meetings import MeetingsMixin
 from .mentor_registration import MentorRegistrationMixin
@@ -20,6 +21,7 @@ from .models import (
 )
 from .parent_meetings import PARENT_BUTTON, ParentMeetingsMixin
 from .preferences import is_admin, records_button, records_title, save_setting
+from .reminders import SmartRemindersMixin
 from .service import apply_import, get_pending_absences, members, register_absence, validate_import
 
 REFRESH_BUTTON = "🔄 به‌روزرسانی بات"
@@ -48,6 +50,7 @@ ADMIN_MENU = [
     [COINS_ADMIN_BUTTON],
     [MENTOR_ADMIN, MENTOR_PANEL],
     ["📅 جلسات", REFRESH_BUTTON],
+    [REMINDER_BUTTON],
 ]
 
 
@@ -60,7 +63,7 @@ def reply(admin=False):
             "resize_keyboard": True}
 
 
-class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, ParentMeetingsMixin):
+class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, ParentMeetingsMixin, SmartRemindersMixin):
     def __init__(self, config, api):
         self.config = config
         self.api = api
@@ -204,6 +207,9 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
                 return
             if not admin:
                 self.say(session, chat_id, "دسترسی مجاز نیست.")
+                return
+            if data.startswith("sr:"):
+                self.reminder_callback(session, chat_id, user_id, state, data)
                 return
             if data.startswith("mi:"):
                 self.mentor_import(session, chat_id, user_id, state, data[3:])
@@ -570,6 +576,12 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
         self.say(session, chat_id, info_text, inline([row for row in rows if row]))
 
     def admin_message(self, session, chat_id, user_id, state, message, text):
+        if text == REMINDER_BUTTON:
+            self.reminder_callback(session, chat_id, user_id, state, "sr:menu")
+            return
+        if state.data.get("mode", "").startswith("reminder_"):
+            self.reminder_message(session, chat_id, state, text)
+            return
         if text == COINS_ADMIN_BUTTON:
             self.coins_menu(session, chat_id, state)
             return

@@ -1,13 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="df18c4f6-24ab-44b1-ad50-7a1ea56a0574" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/bot.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/runtime.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/runtime.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/tests/test_bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/tests/test_bot.py" afterDir="false" />
-    </list>
+    <list default="true" id="df18c4f6-24ab-44b1-ad50-7a1ea56a0574" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -44,7 +38,7 @@
       <workItem from="1795500674252" duration="3084000" />
       <workItem from="1795545797362" duration="2723000" />
       <workItem from="1795556204672" duration="1522000" />
-      <workItem from="1795634210781" duration="1042000" />
+      <workItem from="1795634210781" duration="1648000" />
     </task>
     <servers />
   </component>

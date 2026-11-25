@@ -3,6 +3,7 @@ from .models import Setting
 
 COINS_ADMIN_BUTTON = "🪙 امتیازات"
 COINS_STUDENT_BUTTON = "🪙 سکه‌های هادی"
+REMINDER_BUTTON = "🔔 یادآوری هوشمند"
 
 
 FEATURES = {
@@ -16,6 +17,7 @@ FEATURES = {
     "contacts": "راه‌های ارتباطی",
     "meetings": "جلسات و یادآوری",
     "coins": "امتیازات و سکه‌های هادی",
+    "reminders": "یادآوری هوشمند",
 }
 
 TEXT_FEATURES = {
@@ -32,6 +34,7 @@ TEXT_FEATURES = {
     "🎁 نام بخش تخفیف/رکوردها": "discounts",
     COINS_ADMIN_BUTTON: "coins",
     COINS_STUDENT_BUTTON: "coins",
+    REMINDER_BUTTON: "reminders",
 }
 
 

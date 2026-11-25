@@ -16,7 +16,10 @@ from schoolbot.education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PAN
 from schoolbot.education_models import (
     AbsenceFollowup, FamilyMessage, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass, MentorRegistration, SessionReport,
 )
-from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON
+from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, REMINDER_BUTTON
+from schoolbot.parent_meeting_models import MeetingSection, ParentMeeting, ParentMeetingClass
+from schoolbot.parent_meetings import local_time
+from schoolbot.reminders import SmartReminder
 from schoolbot.models import (
     Attendance, Base, Classroom, CoinAward, CoinCategory, Conversation, Discount, Enrollment,
     Inbox, Outbox, Setting, Student, utcnow,
@@ -149,6 +152,100 @@ class BotTests(unittest.TestCase):
             session.add(MentorClass(mentor_id=mentor, classroom_id=self.class_id,
                                     permissions=sum(PERMISSIONS[key][0] for key in permissions)))
             return other.id
+
+    def test_smart_reminder_multiple_classes_deduplicates_and_requires_admin(self):
+        owner = self.config.admin_id
+        with self.sessions.begin() as session:
+            other = Classroom(title="علوم")
+            third = Classroom(title="تاریخ")
+            extra = Student(national_id="0000000000", full_name="عضو علوم", phone="", bale_user_id=26, chat_id=26)
+            excluded = Student(national_id="0000000001", full_name="عضو تاریخ", phone="", bale_user_id=27, chat_id=27)
+            session.add_all([other, third, extra, excluded])
+            session.flush()
+            second_id = other.id
+            session.add_all([Enrollment(classroom_id=other.id, student_id=self.student_id),
+                             Enrollment(classroom_id=other.id, student_id=extra.id),
+                             Enrollment(classroom_id=third.id, student_id=excluded.id)])
+        self.message("0012345678")
+        self.callback("sr:new", user=25)
+        self.assertIn("مجاز نیست", self.latest_text())
+        self.message(REMINDER_BUTTON, user=owner)
+        self.assertIn("پیام یا یادآوری متنی", " ".join(self.button_texts(self.last_payload_for(owner))))
+        self.callback("sr:new")
+        for classroom_id in (self.class_id, second_id):
+            self.callback(f"sr:toggle:{classroom_id}:0")
+        self.callback("sr:next")
+        self.callback("sr:audience:students")
+        self.message("فردا کتاب بخوانید.", user=owner)
+        self.callback("sr:now")
+        self.assertIn("2 گیرنده", self.latest_text())
+        confirm = "sr:save:" + self.current_nonce()
+        self.callback(confirm)
+        self.callback(confirm)
+        while self.runner.deliver_one():
+            pass
+        self.assertEqual(sorted(payload["chat_id"] for _, payload in self.api.calls
+                                if payload.get("text", "").startswith("🔔 یادآوری\n")), [25, 26])
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(SmartReminder)), 1)
+
+    def test_smart_reminder_scheduled_cancellation(self):
+        owner = self.config.admin_id
+        self.message("0012345678")
+        self.callback("sr:new")
+        self.callback(f"sr:toggle:{self.class_id}:0")
+        self.callback("sr:next")
+        self.callback("sr:audience:students")
+        self.message("آزمون", user=owner)
+        self.message(local_time(utcnow() + timedelta(days=1)), user=owner)
+        self.callback("sr:save:" + self.current_nonce())
+        while self.runner.deliver_one():
+            pass
+        with self.sessions() as session:
+            pending = session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("sr:"))).one()
+            self.assertEqual(pending.status, "pending")
+            identifier = session.scalar(select(SmartReminder.id))
+        self.callback(f"sr:stop:{identifier}")
+        with self.sessions() as session:
+            pending = session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("sr:"))).one()
+            self.assertEqual((pending.status, pending.payload), ("expired", {}))
+
+    def test_smart_reminder_meeting_targets_only_selected_classes_and_expires_after_edit(self):
+        from schoolbot.education_models import GuardianAccount
+
+        owner = self.config.admin_id
+        with self.sessions.begin() as session:
+            section = MeetingSection(title="عمومی")
+            other = Classroom(title="علوم")
+            outsider = Student(national_id="0000000000", full_name="عضو علوم", phone="")
+            session.add_all([section, other, outsider, GuardianAccount(user_id=55, chat_id=55),
+                             GuardianAccount(user_id=56, chat_id=56)])
+            session.flush()
+            meeting = ParentMeeting(section_id=section.id, topic="معارفه", location="سالن",
+                                    starts_at=utcnow() + timedelta(days=3))
+            session.add(meeting)
+            session.flush()
+            meeting_id = meeting.id
+            session.add_all([Enrollment(classroom_id=other.id, student_id=outsider.id),
+                             GuardianLink(student_id=outsider.id, guardian_id=56),
+                             GuardianLink(student_id=self.student_id, guardian_id=55),
+                             ParentMeetingClass(meeting_id=meeting.id, classroom_id=self.class_id),
+                             ParentMeetingClass(meeting_id=meeting.id, classroom_id=other.id)])
+        self.callback(f"sr:pick:{meeting_id}")
+        self.callback(f"sr:toggle:{self.class_id}:0")
+        self.callback("sr:next")
+        self.message("-", user=owner)
+        self.callback("sr:now")
+        self.callback("sr:save:" + self.current_nonce())
+        with self.sessions.begin() as session:
+            notice = session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("sr:"))).one()
+            self.assertEqual(notice.payload["chat_id"], 55)
+            self.assertEqual(notice.payload["reply_markup"]["inline_keyboard"][0][0]["callback_data"], f"pf:view:{meeting_id}")
+            session.get(ParentMeeting, meeting_id).revision += 1
+        while self.runner.deliver_one():
+            pass
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(Outbox.status).where(Outbox.dedupe_key.startswith("sr:"))), "expired")
 
     def test_mentor_excel_registration_requires_single_use_activation(self):
         owner = self.config.admin_id
