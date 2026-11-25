@@ -7,7 +7,7 @@ from .models import Attendance, Classroom, Student
 
 
 ADMIN_ROUTES = {
-    "manage", "add", "mentor", "active", "assign", "mclass", "perm", "unassign",
+    "manage", "add", "uploadmentor", "mentor", "active", "assign", "mclass", "perm", "unassign",
     "guardians", "guardian", "glink", "gunlink", "familylog", "familyview", "referralqueue",
 }
 
@@ -15,7 +15,7 @@ ADMIN_ROUTES = {
 class EducationAdminMixin:
     def education_admin_action(self, session, chat_id, user_id, state, action, args):
         limits = {
-            "manage": (ID_MAX,), "add": (), "mentor": (USER_MAX,), "active": (USER_MAX, 1),
+            "manage": (ID_MAX,), "add": (), "uploadmentor": (), "mentor": (USER_MAX,), "active": (USER_MAX, 1),
             "assign": (USER_MAX, ID_MAX), "mclass": (USER_MAX, ID_MAX),
             "perm": (USER_MAX, ID_MAX, len(PERMISSIONS) - 1, 1), "unassign": (USER_MAX, ID_MAX),
             "guardians": (ID_MAX, ID_MAX), "guardian": (ID_MAX, ID_MAX, ID_MAX),
@@ -31,8 +31,11 @@ class EducationAdminMixin:
                                 values[0], "ed:manage", "مدیریت مربیان",
                                 lambda mentor: (f"{'فعال' if mentor.active else 'غیرفعال'} | {mentor.name}",
                                                 f"ed:mentor:{mentor.user_id}"),
-                                [("➕ ثبت مربی", "ed:add"), ("🎓 کلاس‌ها", "ed:classes:0"),
+                                [("➕ ثبت‌نام مربیان با اکسل", "ed:uploadmentor"), ("ثبت دستی با شناسه بله", "ed:add"), ("🎓 کلاس‌ها", "ed:classes:0"),
                                  ("ارجاع‌های باز همه کلاس‌ها", "ed:referralqueue:0")])
+            return
+        if action == "uploadmentor":
+            self.mentor_template(session, chat_id, state)
             return
         if action == "referralqueue":
             if not self.allow(session, chat_id, ["attendance"]):

@@ -21,7 +21,7 @@ ADMIN_OPERATIONS = {"mentor_add", "assign", "guardian_add", "guardian_remove"}
 ROUTES = {
     "class": (None, 1), "roster": ("roster", 2), "student": ("roster", 2),
     "reports": ("reports", 2), "report": ("reports", 2), "reportnew": ("reports", 1),
-    "family": ("family", 2), "familymsg": ("family", 2),
+    "family": ("family", 2), "familymsg": ("family", 2), "familycontact": ("family", 2),
     **ATTENDANCE_ROUTES, **HOMEWORK_ROUTES,
 }
 OPERATION_FEATURE = {
@@ -95,7 +95,11 @@ class EducationMixin(EducationAdminMixin, EducationAttendanceMixin, EducationHom
             self.say(session, chat_id, "حساب شما به‌عنوان ولی ثبت نشده است. شناسه /id را به مدیریت بدهید.")
             return
         account.chat_id = chat_id if subscribe else None
-        self.say(session, chat_id, "دریافت پیام خانواده فعال شد." if subscribe else "دریافت پیام خانواده متوقف شد.")
+        if subscribe:
+            self.education_say(session, chat_id, "دریافت پیام خانواده فعال شد.",
+                               [[("📅 جلسات والدین", "pf:list:0")]])
+        else:
+            self.say(session, chat_id, "دریافت پیام خانواده متوقف شد.")
 
     def education_classes(self, session, chat_id, user_id, state, admin, page=0):
         self.set_state(state)
@@ -174,10 +178,11 @@ class EducationMixin(EducationAdminMixin, EducationAttendanceMixin, EducationHom
         scope = (user_id, classroom_id, feature, 0)
         if action == "class":
             routes = {"roster": "roster", "reports": "reports", "attendance": "attendance",
-                      "homework": "homework", "family": "family"}
-            rows = [[(label, f"ed:{routes[key]}:{classroom_id}:0")] for key, (_, label) in PERMISSIONS.items()
+                      "homework": "homework", "family": "family", "coins": "coins"}
+            rows = [[(label, f"ed:{routes[key]}:{classroom_id}:0" if key != "coins" else f"coins:categories:{classroom_id}:0")]
+                    for key, (_, label) in PERMISSIONS.items()
                     if class_access(session, self.config.admin_id, user_id, classroom_id, key)
-                    and (key != "attendance" or enabled(session, "attendance"))]
+                    and (key not in ("attendance", "coins") or enabled(session, key))]
             if admin:
                 rows.extend([[("مدیریت اولیا", f"ed:guardians:{classroom_id}:0")],
                              [("سوابق پیام خانواده", f"ed:familylog:{classroom_id}:0")]])
@@ -189,7 +194,7 @@ class EducationMixin(EducationAdminMixin, EducationAttendanceMixin, EducationHom
                                 values[1], f"ed:{action}:{classroom_id}",
                                 "فهرست اعضای فعال" if action == "roster" else "انتخاب مخاطب خانواده",
                                 lambda student: (student.full_name,
-                                                 f"ed:{'student' if action == 'roster' else 'familymsg'}:{classroom_id}:{student.id}"),
+                                                 f"ed:{'student' if action == 'roster' else 'familycontact'}:{classroom_id}:{student.id}"),
                                 ([("پیام گروهی به اولیای همین کلاس", f"ed:familymsg:{classroom_id}:0")]
                                  if action == "family" else []) + [("بازگشت", back)], scope)
         elif action == "student":
@@ -232,6 +237,16 @@ class EducationMixin(EducationAdminMixin, EducationAttendanceMixin, EducationHom
                 return
             self.education_form(session, chat_id, state, "family", "متن پیام به اولیا را بفرستید (حداکثر ۱۵۰۰ نویسه).",
                                 classroom_id=classroom_id, student_id=student_id)
+        elif action == "familycontact":
+            student = active_member(session, classroom_id, values[1])
+            if student is None:
+                self.say(session, chat_id, "دانش‌آموز عضو فعال این کلاس نیست.")
+                return
+            self.education_say(session, chat_id, f"اطلاعات تماس خانوادهٔ «{student.full_name}»"
+                               f"\nپدر: {student.father_phone or 'ثبت نشده'}\nمادر: {student.mother_phone or 'ثبت نشده'}",
+                               [[("ارسال پیام در بله", f"ed:familymsg:{classroom_id}:{student.id}")],
+                                [("بازگشت", f"ed:family:{classroom_id}:0")]],
+                               (user_id, classroom_id, "family", student.id))
 
     def education_message(self, session, chat_id, user_id, state, admin, text):
         data = state.data

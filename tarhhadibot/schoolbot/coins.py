@@ -14,6 +14,8 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import and_, func, or_, select
 
 from . import excel
+from .education_access import class_access
+from .preferences import is_admin
 from .features import callback_features, enabled
 from .models import MAX_COINS_PER_AWARD, Classroom, CoinAward, CoinCategory, Enrollment, Outbox, Student
 
@@ -181,6 +183,10 @@ class CoinsMixin:
                 self.set_state(state)
             return
         _, action, *args = data.split(":")
+        admin = is_admin(session, user_id, self.config.admin_id)
+        if not admin and action not in ("class", "categories", "students", "preview", "confirm"):
+            self.say(session, chat_id, "دسترسی مجاز نیست.")
+            return
         if action == "confirm":
             if len(args) == 1:
                 self._coins_confirm(session, chat_id, user_id, state, args[0])
@@ -198,6 +204,9 @@ class CoinsMixin:
             return
         ids = tuple(map(int, args))
         if any(value > 2147483647 for value in ids):
+            return
+        if not admin and not class_access(session, self.config.admin_id, user_id, ids[0], "coins"):
+            self.say(session, chat_id, "مجوز ثبت سکه برای این کلاس ندارید.")
             return
         self.set_state(state)
         if action == "manage":
@@ -225,9 +234,9 @@ class CoinsMixin:
             return
         if action == "class":
             rows = [[("🪙 ثبت امتیاز", f"coins:categories:{classroom.id}:0")]]
-            if enabled(session, "excel"):
+            if admin and enabled(session, "excel"):
                 rows.append([("📥 اکسل سکه‌های کلاس", f"coins:report:{classroom.id}")])
-            rows.append([("بازگشت به کلاس‌ها", "coins:classes:0")])
+            rows.append([("بازگشت به کلاس‌ها", "coins:classes:0" if admin else "ed:classes:0")])
             self.say(session, chat_id, f"امتیازات کلاس «{classroom.title}»", _keyboard(rows))
         elif action == "report":
             date, jalali = excel.today()
@@ -275,6 +284,9 @@ class CoinsMixin:
             self.say(session, chat_id, "درخواست معتبر نیست یا قبلاً پردازش شده است.")
             return
         self.set_state(state)
+        if not class_access(session, self.config.admin_id, user_id, pending["classroom_id"], "coins"):
+            self.say(session, chat_id, "مجوز ثبت سکه برای این کلاس ندارید.")
+            return
         classroom = session.get(Classroom, pending["classroom_id"])
         category = session.get(CoinCategory, pending["category_id"])
         student = session.get(Student, pending["student_id"])

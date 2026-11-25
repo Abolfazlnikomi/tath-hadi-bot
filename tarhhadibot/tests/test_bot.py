@@ -14,7 +14,7 @@ from schoolbot.bot import REFRESH_BUTTON
 from schoolbot.config import Config
 from schoolbot.education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, PERMISSIONS
 from schoolbot.education_models import (
-    AbsenceFollowup, FamilyMessage, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass, SessionReport,
+    AbsenceFollowup, FamilyMessage, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass, MentorRegistration, SessionReport,
 )
 from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON
 from schoolbot.models import (
@@ -149,6 +149,59 @@ class BotTests(unittest.TestCase):
             session.add(MentorClass(mentor_id=mentor, classroom_id=self.class_id,
                                     permissions=sum(PERMISSIONS[key][0] for key in permissions)))
             return other.id
+
+    def test_mentor_excel_registration_requires_single_use_activation(self):
+        owner = self.config.admin_id
+        self.callback("ed:uploadmentor")
+        self.api.content = excel.workbook("mentors", [("مربی نمونه", "۰۰۱۲۳۴۵۶۷۸", "۰۹۱۲۳۴۵۶۷۸۹")])
+        self.message(user=owner, document={"file_id": "fixture"})
+        self.callback("mi:" + self.current_nonce())
+        with self.sessions() as session:
+            output = session.scalar(select(Outbox).where(Outbox.method == "sendDocument").order_by(Outbox.id.desc()).limit(1))
+            registration = session.get(MentorRegistration, "0012345678")
+            self.assertIsNone(registration.user_id)
+            book = load_workbook(BytesIO(base64.b64decode(output.payload["_file"]["content"])))
+        code = book.active["D2"].value
+        book.close()
+        self.message("/mentor", user=41)
+        self.message("0012345678 09123456789", user=41)
+        self.assertIn("معتبر نیست", self.latest_text())
+        self.message(f"0012345678 09123456789 {code}", user=41)
+        self.assertIn("خوش آمدید", self.latest_text())
+        self.message("/mentor", user=42)
+        self.message(f"0012345678 09123456789 {code}", user=42)
+        self.assertIn("معتبر نیست", self.latest_text())
+        with self.sessions() as session:
+            registration = session.get(MentorRegistration, "0012345678")
+            self.assertEqual((registration.user_id, registration.activation_hash), (41, None))
+            self.assertIsNone(session.get(Mentor, 42))
+
+    def test_family_phones_and_mentor_coin_permissions_are_class_scoped(self):
+        other = self.educational_fixture(permissions=("family", "coins"))
+        data = excel.workbook("students", [("دانش آموز", "0012345678", "09123456789", "۰۹۱۱۱۱۱۱۱۱۱", "۰۹۲۲۲۲۲۲۲۲۲")],
+                              self.class_id)
+        with self.sessions.begin() as session:
+            apply_import(session, excel.parse(data, "students", self.class_id))
+            apply_import(session, self.pending(kind="students"))
+        self.callback(f"ed:familycontact:{self.class_id}:{self.student_id}", user=41)
+        self.assertIn("09111111111", self.latest_text())
+        self.assertIn("09222222222", self.latest_text())
+        self.callback(f"ed:familycontact:{other}:{self.student_id}", user=41)
+        self.assertIn("مجاز نیست", self.latest_text())
+        category_id = self.coin_category()
+        self.callback(f"coins:preview:{self.class_id}:{category_id}:{self.student_id}", user=41)
+        stale = "coins:confirm:" + self.current_nonce(41)
+        self.callback(f"ed:perm:41:{self.class_id}:5:0")
+        self.callback(stale, user=41)
+        self.assertIn("مجوز ثبت سکه", self.latest_text())
+        self.callback(f"ed:perm:41:{self.class_id}:5:1")
+        self.callback(f"coins:preview:{self.class_id}:{category_id}:{self.student_id}", user=41)
+        self.confirm_education(41, prefix="coins")
+        self.callback(f"coins:report:{self.class_id}", user=41)
+        self.assertIn("مجاز نیست", self.latest_text())
+        with self.sessions() as session:
+            award = session.scalars(select(CoinAward)).one()
+            self.assertEqual((award.actor_id, award.amount), (41, 15))
 
     def test_education_mentor_registration_multiple_classes_and_restricted_permissions(self):
         owner = self.config.admin_id

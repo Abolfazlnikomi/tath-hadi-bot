@@ -43,6 +43,9 @@ def apply_import(session, pending):
                 student.full_name = row["name"]
                 student.phone = row["phone"]
                 student.active = True
+            for key in ("father_phone", "mother_phone"):
+                if key in row:
+                    setattr(student, key, row[key])
             if session.get(Enrollment, (classroom_id, student.id)) is None:
                 session.add(Enrollment(classroom_id=classroom_id, student_id=student.id))
         elif pending["kind"] == "attendance":

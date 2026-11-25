@@ -87,7 +87,14 @@ class BaleAPI:
             raise ValueError("حجم فایل بیش از حد مجاز است.")
         if not document.get("file_name", "").lower().endswith(".xlsx"):
             raise ValueError("فقط فایل xlsx مجاز است.")
-        info = self.call("getFile", {"file_id": document["file_id"]})
+        return self._download_file(document["file_id"], self.config.max_file_bytes)
+
+    def validate_photo(self, file_id, limit):
+        if not self._download_file(file_id, limit):
+            raise ValueError("تصویر معتبر نیست.")
+
+    def _download_file(self, file_id, limit):
+        info = self.call("getFile", {"file_id": file_id})
         path = info.get("file_path", "") if isinstance(info, dict) else ""
         url = self.download_url(path)
         try:
@@ -97,7 +104,7 @@ class BaleAPI:
                 content = bytearray()
                 for chunk in response.iter_bytes():
                     content.extend(chunk)
-                    if len(content) > self.config.max_file_bytes:
+                    if len(content) > limit:
                         raise ValueError("حجم فایل بیش از حد مجاز است.")
                 return bytes(content)
         except httpx.HTTPError:

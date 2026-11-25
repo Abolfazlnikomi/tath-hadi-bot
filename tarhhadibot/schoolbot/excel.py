@@ -5,11 +5,14 @@ from zipfile import ZipFile
 import jdatetime
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from zoneinfo import ZoneInfo
 
 
 HEADERS = {
-    "students": ["نام و نام خانوادگی", "کد ملی", "شماره تماس"],
+    "students": ["نام و نام خانوادگی", "کد ملی", "شماره تماس", "شماره تماس پدر", "شماره تماس مادر"],
+    "mentors": ["نام و نام خانوادگی", "کد ملی", "شماره تماس"],
+    "mentor_codes": ["نام و نام خانوادگی", "کد ملی", "شماره تماس", "کد فعال‌سازی"],
     "attendance": ["کد ملی", "نام و نام خانوادگی", "وضعیت (حاضر / غایب)"],
     "discounts": ["کد ملی", "نام و نام خانوادگی", "کد تخفیف", "توضیحات/عنوان دوره"],
     "meeting_invites": ["کد ملی"],
@@ -32,6 +35,14 @@ def national_id(value):
     return result
 
 
+def phone_number(value, optional=False):
+    if optional and not value:
+        return None
+    if not value.isascii() or not value.isdigit() or not 10 <= len(value) <= 15:
+        raise ExcelError("شماره تماس باید ۱۰ تا ۱۵ رقم باشد؛ صفر ابتدایی را حفظ کنید.")
+    return value
+
+
 def today():
     current = datetime.now(ZoneInfo("Asia/Tehran")).date()
     return current, jdatetime.date.fromgregorian(date=current).strftime("%Y/%m/%d")
@@ -52,8 +63,8 @@ def workbook(kind, rows=(), classroom_id=None, session_date=None):
         for cell in row:
             cell.data_type = "s"
             cell.number_format = "@"
-    for column in "ABCD"[:len(HEADERS[kind])]:
-        sheet.column_dimensions[column].width = 30
+    for index in range(1, len(HEADERS[kind]) + 1):
+        sheet.column_dimensions[get_column_letter(index)].width = 30
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     if kind == "attendance":
@@ -86,7 +97,7 @@ def parse(content, kind, classroom_id, max_rows=10000):
         if "_meta" not in book.sheetnames:
             raise ExcelError("از فایل نمونه دریافتی همین ربات استفاده کنید؛ شیت اطلاعات حذف شده است.")
         metadata = dict(book["_meta"].iter_rows(values_only=True))
-        if metadata.get("kind") != kind or str(metadata.get("classroom_id")) != str(classroom_id):
+        if metadata.get("kind") != kind or str(metadata.get("classroom_id") or "") != str(classroom_id or ""):
             raise ExcelError("این فایل مربوط به کلاس یا عملیات انتخاب‌شده نیست.")
         session_date = metadata.get("session_date")
         if kind == "attendance":
@@ -98,7 +109,9 @@ def parse(content, kind, classroom_id, max_rows=10000):
                 raise ExcelError("ثبت حضور و غیاب برای آینده مجاز نیست.")
         sheet = book["داده‌ها"]
         iterator = sheet.iter_rows()
-        if [cell.value for cell in next(iterator)] != HEADERS[kind]:
+        headers = [cell.value for cell in next(iterator)]
+        legacy_students = kind == "students" and headers == HEADERS[kind][:3]
+        if headers != HEADERS[kind] and not legacy_students:
             raise ExcelError("عنوان ستون‌ها را تغییر ندهید.")
         records, seen = [], set()
         for index, cells in enumerate(iterator, 2):
@@ -110,14 +123,16 @@ def parse(content, kind, classroom_id, max_rows=10000):
                 raise ExcelError(f"ردیف {index}: استفاده از فرمول مجاز نیست.")
             values = [normalize(cell.value) for cell in cells]
             try:
-                if kind == "students":
-                    name, code, phone = values
+                if kind in ("students", "mentors"):
+                    name, code, phone = values[:3]
                     code = national_id(code)
                     if not name or len(name) > 200:
                         raise ExcelError("نام الزامی و حداکثر ۲۰۰ کاراکتر است.")
-                    if not phone.isascii() or not phone.isdigit() or not 10 <= len(phone) <= 15:
-                        raise ExcelError("شماره تماس باید ۱۰ تا ۱۵ رقم باشد؛ صفر ابتدایی را حفظ کنید.")
-                    record = {"national_id": code, "name": name, "phone": phone}
+                    record = {"national_id": code, "name": name, "phone": phone_number(phone)}
+                    if kind == "students" and not legacy_students:
+                        for key, value in zip(("father_phone", "mother_phone"), values[3:]):
+                            if value:
+                                record[key] = None if value == "-" else phone_number(value)
                     key = code
                 else:
                     code = national_id(values[0])

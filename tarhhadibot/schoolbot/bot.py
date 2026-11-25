@@ -14,9 +14,11 @@ from .features import (
     COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, FEATURES, TEXT_FEATURES, callback_features, enabled, state_features,
 )
 from .meetings import MeetingsMixin
+from .mentor_registration import MentorRegistrationMixin
 from .models import (
     Attendance, Audit, Classroom, Conversation, Discount, Enrollment, LoginThrottle, Outbox, Setting, Student, utcnow,
 )
+from .parent_meetings import PARENT_BUTTON, ParentMeetingsMixin
 from .preferences import is_admin, records_button, records_title, save_setting
 from .service import apply_import, get_pending_absences, members, register_absence, validate_import
 
@@ -58,7 +60,7 @@ def reply(admin=False):
             "resize_keyboard": True}
 
 
-class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
+class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, ParentMeetingsMixin):
     def __init__(self, config, api):
         self.config = config
         self.api = api
@@ -187,6 +189,12 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
             if data.startswith("hw:"):
                 self.student_homework_callback(session, chat_id, user_id, state, data)
                 return
+            if data.startswith("pf:"):
+                self.parent_meeting_participant(session, chat_id, user_id, data)
+                return
+            if data.startswith("coins:") and (admin or mentor_active(session, user_id)):
+                self.coins_callback(session, chat_id, user_id, state, data)
+                return
             if data.startswith(("mr:", "my:")):
                 self.registered_participant(session, chat_id, user_id, data)
                 return
@@ -197,11 +205,14 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
             if not admin:
                 self.say(session, chat_id, "دسترسی مجاز نیست.")
                 return
+            if data.startswith("mi:"):
+                self.mentor_import(session, chat_id, user_id, state, data[3:])
+                return
+            if data.startswith("pm:"):
+                self.parent_meeting_admin(session, chat_id, user_id, state, data)
+                return
             if data.startswith("mt:"):
                 self.meeting_admin_callback(session, chat_id, user_id, state, data)
-                return
-            if data.startswith("coins:"):
-                self.coins_callback(session, chat_id, user_id, state, data)
                 return
             self.callback(session, chat_id, user_id, state, data)
             return
@@ -216,6 +227,16 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
             return
         if text in ("/family", "/family_off"):
             self.education_guardian_command(session, chat_id, user_id, text == "/family")
+            return
+        if text in (PARENT_BUTTON, "/family_meetings"):
+            if admin:
+                self.parent_meeting_admin(session, chat_id, user_id, state, "pm:list:0")
+            else:
+                self.parent_meeting_participant(session, chat_id, user_id, "pf:list:0")
+            return
+        if text == "/mentor":
+            self.set_state(state, mode="mentor_login")
+            self.say(session, chat_id, "کد ملی، شماره تماس و کد فعال‌سازی مربی را در یک پیام یا سه خط بفرستید.")
             return
         mentor = not admin and mentor_active(session, user_id)
         if text == MENTOR_PANEL:
@@ -262,6 +283,12 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
             return
         if state.data.get("mode", "").startswith("education_"):
             self.education_message(session, chat_id, user_id, state, admin, text)
+            return
+        if state.data.get("mode") == "mentor_login":
+            self.mentor_login(session, chat_id, user_id, state, text)
+            return
+        if admin and state.data.get("mode") == "mentor_upload":
+            self.mentor_upload(session, chat_id, state, message)
             return
         if state.data.get("mode", "").startswith("student_homework_"):
             self.student_homework_message(session, chat_id, user_id, state, text)
@@ -549,6 +576,9 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
         if text == "📅 جلسات":
             self.set_state(state)
             self.meeting_list(session, chat_id)
+            return
+        if state.data.get("mode", "").startswith("parent_"):
+            self.parent_meeting_message(session, chat_id, state, message, text)
             return
         if state.data.get("mode", "").startswith("meeting_"):
             self.meeting_admin_message(session, chat_id, state, message, text)
@@ -1013,7 +1043,7 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
                            "record": f"برای ثبت رکورد در «{records_title(session)}»، کد ملی دانش‌آموز عضو کلاس را بفرستید."}
                 self.say(session, chat_id, prompts[action])
             return
-        if len(parts) == 3 and parts[1] in excel.HEADERS and parts[2].isdigit():
+        if len(parts) == 3 and parts[1] in ("students", "attendance", "discounts") and parts[2].isdigit():
             kind, classroom_id = parts[1], int(parts[2])
             if session.get(Classroom, classroom_id) is None:
                 self.say(session, chat_id, "کلاس یافت نشد.")
@@ -1056,7 +1086,8 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
         rows = []
         if not template:
             if kind == "students":
-                rows = [(student.full_name, student.national_id, student.phone) for student in roster]
+                rows = [(student.full_name, student.national_id, student.phone,
+                         student.father_phone, student.mother_phone) for student in roster]
             elif kind == "attendance":
                 from .models import Attendance
 

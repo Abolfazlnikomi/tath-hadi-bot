@@ -21,6 +21,8 @@ class Student(Base):
     national_id: Mapped[str] = mapped_column(String(10), unique=True)
     full_name: Mapped[str] = mapped_column(String(200))
     phone: Mapped[str] = mapped_column(String(20))
+    father_phone: Mapped[str | None] = mapped_column(String(20))
+    mother_phone: Mapped[str | None] = mapped_column(String(20))
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     bale_user_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     chat_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
@@ -120,6 +122,8 @@ class Meeting(Base):
     location: Mapped[str] = mapped_column(String(200))
     starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)
     classroom: Mapped[Classroom] = relationship()
 
 

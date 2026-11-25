@@ -20,6 +20,15 @@ class MentorClass(Base):
     permissions: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class MentorRegistration(Base):
+    __tablename__ = "mentor_registrations"
+    national_id: Mapped[str] = mapped_column(String(10), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    phone: Mapped[str] = mapped_column(String(20))
+    activation_hash: Mapped[str | None] = mapped_column(String(64))
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("mentors.user_id"), unique=True)
+
+
 class SessionReport(Base):
     __tablename__ = "education_session_reports"
     id: Mapped[int] = mapped_column(primary_key=True)

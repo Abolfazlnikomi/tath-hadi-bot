@@ -14,6 +14,7 @@ from .config import Config
 from .education_access import valid_education_delivery
 from .meetings import schedule_reminders, valid_delivery
 from .models import Base, Conversation, Inbox, LoginThrottle, Outbox, Setting, utcnow
+from .parent_meetings import parent_delivery_stage, schedule_parent_meetings
 
 
 logger = logging.getLogger("schoolbot")
@@ -53,6 +54,15 @@ class Runner:
             for column in ("instructor", "location", "schedule"):
                 if column not in existing:
                     connection.exec_driver_sql(f"ALTER TABLE classrooms ADD COLUMN {column} VARCHAR(200)")
+            student_columns = {column["name"] for column in inspect(connection).get_columns("students")}
+            for column in ("father_phone", "mother_phone"):
+                if column not in student_columns:
+                    connection.exec_driver_sql(f"ALTER TABLE students ADD COLUMN {column} VARCHAR(20)")
+            meeting_columns = {column["name"] for column in inspect(connection).get_columns("meetings")}
+            if "revision" not in meeting_columns:
+                connection.exec_driver_sql("ALTER TABLE meetings ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+            if "cancelled" not in meeting_columns:
+                connection.exec_driver_sql("ALTER TABLE meetings ADD COLUMN cancelled BOOLEAN NOT NULL DEFAULT FALSE")
             with self.sessions(bind=connection) as session, session.begin():
                 version = session.get(Setting, "schema_version")
                 if version is None:
@@ -138,7 +148,9 @@ class Runner:
             if message is None:
                 return False
             key = message.dedupe_key or ""
-            if ((key.startswith("meeting:") and not valid_delivery(session, message, utcnow()))
+            parent_stage = parent_delivery_stage(session, message, utcnow()) if key.startswith("pm:") else None
+            if ((key.startswith("pm:") and parent_stage is None)
+                    or (key.startswith("meeting:") and not valid_delivery(session, message, utcnow()))
                     or (key.startswith("coins:") and not valid_coin_delivery(session, message))
                     or (key.startswith(("edview:", "edfamily:", "edfeedback:"))
                         and not valid_education_delivery(session, message, self.config.admin_id))):
@@ -158,6 +170,8 @@ class Runner:
                     delay = error.retry_after or min(300, 2 ** min(message.attempts, 8))
                     message.available_at = utcnow() + timedelta(seconds=delay)
             else:
+                if parent_stage is not None and message.method == "sendMessage":
+                    parent_stage.delivered_at = utcnow()
                 message.status = "sent"
                 message.last_error = None
                 message.payload = {}
@@ -233,6 +247,7 @@ class Runner:
                     try:
                         with self.sessions.begin() as session:
                             schedule_reminders(session)
+                            schedule_parent_meetings(session)
                     except Exception as error:
                         logger.error("Meeting reminder job failed (%s)", error_location(error))
                 if time.monotonic() >= next_prune:

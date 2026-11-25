@@ -57,8 +57,9 @@ def queue_notice(session, meeting, invite, student, kind):
     payload = {"chat_id": student.chat_id, "text": text}
     if kind == "three":
         payload["reply_markup"] = keyboard([[(RESPONSES[choice], f"mr:{meeting.id}:{choice}") for choice in ("yes", "no")]])
+    revision = f":{meeting.revision}" if meeting.revision > 1 else ""
     session.add(Outbox(method="sendMessage", payload=payload,
-                       dedupe_key=f"meeting:{meeting.id}:{student.id}:{kind}"))
+                       dedupe_key=f"meeting:{meeting.id}:{student.id}:{kind}{revision}"))
     setattr(invite, f"{kind}_queued", True)
 
 
@@ -68,7 +69,7 @@ def schedule_reminders(session, now=None):
     now = now or utcnow()
     invites = session.scalars(select(MeetingInvite).join(MeetingInvite.meeting).join(MeetingInvite.student).where(
         Student.active.is_(True), Student.chat_id.is_not(None), Student.bale_user_id.is_not(None),
-        Meeting.starts_at > now,
+        Meeting.starts_at > now, Meeting.cancelled.is_(False),
         or_(MeetingInvite.notice_queued.is_(False),
             (MeetingInvite.three_queued.is_(False) & (Meeting.starts_at <= now + timedelta(days=3))),
             (MeetingInvite.one_queued.is_(False) & (Meeting.starts_at <= now + timedelta(days=1)))),
@@ -87,11 +88,12 @@ def schedule_reminders(session, now=None):
 
 
 def valid_delivery(session, message, now):
-    _, meeting_id, student_id, kind = message.dedupe_key.split(":")
+    _, meeting_id, student_id, kind, *revision = message.dedupe_key.split(":")
     student = session.get(Student, int(student_id))
     meeting = session.get(Meeting, int(meeting_id))
     if not (enabled(session, "meetings") and student and student.active and student.bale_user_id is not None
-            and student.chat_id == message.payload.get("chat_id") and meeting):
+            and student.chat_id == message.payload.get("chat_id") and meeting and not meeting.cancelled
+            and meeting.revision == (int(revision[0]) if revision else 1)):
         return False
     expiry = utc(meeting.starts_at) - (timedelta(days=1) if kind == "three" else timedelta())
     return now < expiry
@@ -132,13 +134,13 @@ class MeetingsMixin:
     def meeting_list(self, session, chat_id, page=0, student=None):
         query = select(Meeting)
         if student is not None:
-            query = query.join(MeetingInvite).where(MeetingInvite.student_id == student.id)
+            query = query.join(MeetingInvite).where(MeetingInvite.student_id == student.id, Meeting.cancelled.is_(False))
         items = list(session.scalars(query.order_by(Meeting.starts_at.desc(), Meeting.id.desc())
                                      .offset(page * PAGE_SIZE).limit(PAGE_SIZE + 1)))
-        rows = [[("➕ ثبت جلسه", "mt:classes:0")]] if student is None else []
+        rows = [[("📅 جلسات والدین", "pm:list:0")], [("➕ ثبت جلسه برای دانش‌آموزان", "mt:classes:0")]] if student is None else []
         prefix = "mt:list" if student is None else "my:page"
         if student is None:
-            rows.extend([(f"{item.topic[:62]}", f"mt:view:{item.id}")] for item in items[:PAGE_SIZE])
+            rows.extend([(f"{'لغوشده | ' if item.cancelled else ''}{item.topic[:62]}", f"mt:view:{item.id}")] for item in items[:PAGE_SIZE])
         nav = []
         if page:
             nav.append(("قبلی", f"{prefix}:{page - 1}"))
@@ -171,7 +173,7 @@ class MeetingsMixin:
             return
         invite = session.get(MeetingInvite, (int(answer[1]), student.id))
         now = utcnow()
-        if not invite or utc(invite.meeting.starts_at) <= now:
+        if not invite or invite.meeting.cancelled or utc(invite.meeting.starts_at) <= now:
             self.say(session, chat_id, "این دعوت در دسترس نیست یا زمان پاسخ به پایان رسیده است.")
             return
         if invite.response != answer[2]:
@@ -210,7 +212,7 @@ class MeetingsMixin:
         if not match:
             return
         action, value = match.groups()
-        if action in ("list", "classes", "choose", "view", "export") and not value.isdigit():
+        if action in ("list", "classes", "choose", "view", "export", "edit", "delete") and not value.isdigit():
             return
         if action in ("list", "classes") and len(value) > 9:
             return
@@ -277,7 +279,27 @@ class MeetingsMixin:
             self.say(session, chat_id, f"✅ جلسه ثبت شد. اعلان {queued} نفر در صف است. "
                      f"{len(roster) - queued} نفر هنوز به بله متصل نیستند.",
                      keyboard([[("مشاهده جلسه", f"mt:view:{meeting.id}"), ("همه جلسات", "mt:list:0")]]))
-        elif action in ("view", "export"):
+        elif action == "change" and mode == "meeting_change_confirm" and value == state.data["nonce"]:
+            draft = state.data["draft"]
+            self.set_state(state)
+            meeting = session.get(Meeting, draft["id"])
+            if not meeting or meeting.cancelled or meeting.revision != draft["revision"]:
+                self.say(session, chat_id, "جلسه تغییر کرده یا دیگر در دسترس نیست.")
+                return
+            if draft.get("cancelled"):
+                meeting.cancelled = True
+            else:
+                start = datetime.fromisoformat(draft["starts_at"])
+                if start <= utcnow():
+                    self.say(session, chat_id, "زمان جدید باید در آینده باشد.")
+                    return
+                meeting.topic, meeting.location, meeting.starts_at = draft["topic"], draft["location"], start
+                for invite in session.scalars(select(MeetingInvite).where(MeetingInvite.meeting_id == meeting.id)):
+                    invite.notice_queued = invite.three_queued = invite.one_queued = False
+            meeting.revision += 1
+            self.audit(session, user_id, "cancel_meeting" if meeting.cancelled else "edit_meeting", meeting_id=meeting.id)
+            self.say(session, chat_id, "✅ تغییرات جلسه ثبت شد.")
+        elif action in ("view", "export", "edit", "delete"):
             meeting = session.get(Meeting, int(value))
             if not meeting:
                 self.say(session, chat_id, "جلسه یافت نشد.")
@@ -285,19 +307,51 @@ class MeetingsMixin:
                 rows = [[("بازگشت", "mt:list:0")]]
                 if enabled(session, "excel"):
                     rows.insert(0, [("دریافت اکسل پاسخ‌ها", f"mt:export:{meeting.id}")])
-                self.say(session, chat_id, describe(meeting), keyboard(rows))
-            elif self.allow(session, chat_id, ["excel"]):
+                if not meeting.cancelled:
+                    rows.insert(0, [("ویرایش", f"mt:edit:{meeting.id}"), ("حذف / لغو", f"mt:delete:{meeting.id}")])
+                self.say(session, chat_id, describe(meeting) + ("\nلغوشده" if meeting.cancelled else ""), keyboard(rows))
+            elif action == "export" and self.allow(session, chat_id, ["excel"]):
                 self.meeting_document(session, chat_id, response_workbook(session, meeting),
                                       f"meeting-{meeting.id}-responses.xlsx", "گزارش پاسخ دعوت‌شدگان")
+            elif action in ("edit", "delete") and not meeting.cancelled:
+                draft = {"id": meeting.id, "revision": meeting.revision}
+                if action == "delete":
+                    self.meeting_change_preview(session, chat_id, state, {**draft, "cancelled": True}, "این جلسه لغو شود؟")
+                else:
+                    from .parent_meetings import time_prompt
+
+                    self.set_state(state, mode="meeting_change", draft=draft)
+                    self.say(session, chat_id, "موضوع، مکان و زمان جدید را در سه خط بفرستید.\n" + time_prompt())
         else:
             self.say(session, chat_id, "این گزینه منقضی شده است؛ دوباره از منوی جلسات اقدام کنید.")
+
+    def meeting_change_preview(self, session, chat_id, state, draft, prompt):
+        nonce = secrets.token_hex(8)
+        self.set_state(state, mode="meeting_change_confirm", draft=draft, nonce=nonce)
+        self.say(session, chat_id, prompt, keyboard([[("تأیید", f"mt:change:{nonce}"), ("لغو", "cancel")]]))
 
     def meeting_admin_message(self, session, chat_id, state, message, text):
         mode = state.data["mode"]
         draft = dict(state.data["draft"])
         if not self.allow(session, chat_id, ["meetings"] + (["excel"] if mode == "meeting_upload" else [])):
             return
-        if mode in ("meeting_topic", "meeting_location"):
+        if mode == "meeting_change":
+            from .parent_meetings import time_prompt
+
+            fields = [field.strip() for field in text.splitlines()]
+            try:
+                if len(fields) != 3 or not all(1 <= len(field) <= 200 and "\0" not in field for field in fields[:2]):
+                    raise ValueError
+                start = parse_start(fields[2])
+                if start <= utcnow():
+                    raise ValueError
+            except (ValueError, OverflowError):
+                self.say(session, chat_id, "سه خط معتبر بفرستید.\n" + time_prompt())
+                return
+            self.meeting_change_preview(session, chat_id, state,
+                                        {**draft, "topic": fields[0], "location": fields[1], "starts_at": start.isoformat()},
+                                        f"تغییرات تأیید شود؟\n{fields[0]}\n{fields[1]}\n{fields[2]}")
+        elif mode in ("meeting_topic", "meeting_location"):
             if not 1 <= len(text) <= 200:
                 self.say(session, chat_id, "متن باید بین ۱ تا ۲۰۰ نویسه باشد.")
                 return
@@ -308,14 +362,18 @@ class MeetingsMixin:
             else:
                 draft["location"] = text
                 self.set_state(state, mode="meeting_time", draft=draft)
-                self.say(session, chat_id, "تاریخ شمسی و ساعت جلسه به وقت تهران را با قالب سال/ماه/روز ساعت:دقیقه بفرستید؛ نمونه: ۱۴۰۶/۰۲/۱۵ ۱۶:۳۰")
+                from .parent_meetings import time_prompt
+
+                self.say(session, chat_id, time_prompt())
         elif mode == "meeting_time":
             try:
                 start = parse_start(text)
                 if start <= utcnow():
                     raise ValueError
             except (ValueError, OverflowError):
-                self.say(session, chat_id, "تاریخ شمسی و ساعت معتبر در آینده وارد کنید؛ نمونه: ۱۴۰۶/۰۲/۱۵ ۱۶:۳۰")
+                from .parent_meetings import time_prompt
+
+                self.say(session, chat_id, "تاریخ یا ساعت معتبر نیست.\n" + time_prompt())
                 return
             draft["starts_at"] = start.isoformat()
             self.set_state(state, mode="meeting_audience", draft=draft)
