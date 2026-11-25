@@ -12,6 +12,10 @@ from schoolbot import excel
 from schoolbot.api import BaleError
 from schoolbot.bot import REFRESH_BUTTON
 from schoolbot.config import Config
+from schoolbot.education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, PERMISSIONS
+from schoolbot.education_models import (
+    AbsenceFollowup, FamilyMessage, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass, SessionReport,
+)
 from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON
 from schoolbot.models import (
     Attendance, Base, Classroom, CoinAward, CoinCategory, Conversation, Discount, Enrollment,
@@ -131,6 +135,189 @@ class BotTests(unittest.TestCase):
             row.update(code="OFF-20", description="دوره اول")
         return {"kind": kind, "classroom_id": self.class_id,
                 "session_date": excel.today()[0].isoformat(), "rows": [row]}
+
+    def confirm_education(self, user=None, prefix="ed"):
+        action = f"{prefix}:confirm:{self.current_nonce(user)}"
+        self.callback(action, user=user)
+        return action
+
+    def educational_fixture(self, mentor=41, permissions=()):
+        with self.sessions.begin() as session:
+            other = Classroom(title="علوم")
+            session.add_all([other, Mentor(user_id=mentor, name="مربی")])
+            session.flush()
+            session.add(MentorClass(mentor_id=mentor, classroom_id=self.class_id,
+                                    permissions=sum(PERMISSIONS[key][0] for key in permissions)))
+            return other.id
+
+    def test_education_mentor_registration_multiple_classes_and_restricted_permissions(self):
+        owner = self.config.admin_id
+        with self.sessions.begin() as session:
+            second_class = Classroom(title="علوم")
+            session.add(second_class)
+            session.flush()
+            second = second_class.id
+        self.message(MENTOR_ADMIN, user=owner)
+        self.callback("ed:add")
+        self.message("مربی نمونه\n۴۱", user=owner)
+        self.confirm_education()
+        self.message("/start", user=41)
+        self.assertIn(MENTOR_PANEL, self.button_texts(self.last_payload_for(41)))
+        self.message(MENTOR_PANEL, user=41)
+        self.assertIn("موردی برای نمایش نیست", self.latest_text())
+        for class_id in (self.class_id, second):
+            self.callback(f"ed:mclass:41:{class_id}")
+            self.confirm_education()
+        self.callback(f"ed:roster:{self.class_id}:0", user=41)
+        self.assertIn("مجاز نیست", self.latest_text())
+        self.callback(f"ed:perm:41:{self.class_id}:0:1")
+        self.callback(f"ed:roster:{self.class_id}:0", user=41)
+        self.assertIn("دانش آموز", self.button_texts(self.last_payload_for(41)))
+        self.callback(f"ed:roster:{second}:0", user=41)
+        self.assertIn("مجاز نیست", self.latest_text())
+        self.callback(f"ed:perm:41:{second}:0:1", user=41)
+        self.assertIn("فقط ادمین", self.latest_text())
+        self.callback("coins:menu", user=41)
+        self.assertIn("دسترسی مجاز نیست", self.latest_text())
+        self.callback("ed:active:41:0")
+        self.callback(f"ed:class:{self.class_id}", user=41)
+        self.assertIn("پنل آموزشی مجاز نیست", self.latest_text())
+        while self.runner.deliver_one():
+            pass
+        self.assertFalse(any(payload.get("chat_id") == 41 and "فهرست اعضای فعال" in payload.get("text", "")
+                             for _, payload in self.api.calls))
+
+    def test_education_report_scope_expiry_and_replayed_confirmation(self):
+        other = self.educational_fixture(permissions=("reports",))
+        self.callback(f"ed:reportnew:{other}", user=41)
+        self.assertIn("مجاز نیست", self.latest_text())
+        with self.sessions.begin() as session:
+            session.add(SessionReport(classroom_id=other, actor_id=self.config.admin_id,
+                                      session_date=excel.today()[0], topic="خصوصی", presence="حاضر",
+                                      activity="تمرین", next_action="پیگیری"))
+            session.flush()
+            other_report = session.scalar(select(SessionReport.id))
+        self.callback(f"ed:report:{self.class_id}:{other_report}", user=41)
+        self.assertIn("پیدا نشد", self.latest_text())
+        for attempt in range(2):
+            self.callback(f"ed:reportnew:{self.class_id}", user=41)
+            self.message("درس اول\nهمه حاضر\nتمرین\nمرور", user=41)
+            if attempt == 0:
+                self.callback(f"ed:perm:41:{self.class_id}:1:0")
+                self.confirm_education(41)
+                self.assertIn("مجاز نیست", self.latest_text())
+                self.callback(f"ed:perm:41:{self.class_id}:1:1")
+            else:
+                nonce = self.confirm_education(41)
+                self.callback(nonce, user=41)
+        with self.sessions() as session:
+            report = session.scalars(select(SessionReport).where(SessionReport.classroom_id == self.class_id)).one()
+            self.assertEqual((report.actor_id, report.topic, report.presence), (41, "درس اول", "همه حاضر"))
+
+    def test_education_bulk_attendance_and_admin_referral_queue(self):
+        other = self.educational_fixture(permissions=("attendance",))
+        self.message("0012345678")
+        self.callback(f"ed:roll:{other}", user=41)
+        self.assertIn("مجاز نیست", self.latest_text())
+        self.callback(f"ed:roll:{self.class_id}", user=41)
+        nonce = self.current_nonce(41)
+        self.callback(f"ed:rollall:{nonce}:0", user=41)
+        self.callback(f"ed:rollmark:{nonce}:{self.student_id}:0", user=41)
+        self.callback(f"ed:rollreview:{nonce}", user=41)
+        self.confirm_education(41)
+        with self.sessions() as session:
+            attendance = session.scalars(select(Attendance)).one()
+            self.assertEqual(attendance.status, "غایب")
+            attendance_id = attendance.id
+        self.assertIn("غایب", self.last_payload_for(25)["text"])
+        self.callback(f"ed:followup:{self.class_id}:{attendance_id}", user=41)
+        self.message("نامشخص\nارجاع", user=41)
+        self.confirm_education(41)
+        self.callback(f"ed:resolve:{self.class_id}:{attendance_id}", user=41)
+        self.assertIn("فقط برای ادمین", self.latest_text())
+        self.callback("ed:referralqueue:0")
+        self.assertTrue(any("ریاضی" in label for label in self.button_texts(self.last_payload_for(self.config.admin_id))))
+        self.callback(f"ed:resolve:{self.class_id}:{attendance_id}")
+        self.confirm_education()
+        with self.sessions() as session:
+            self.assertTrue(session.get(AbsenceFollowup, attendance_id).resolved)
+
+    def test_education_homework_submission_private_feedback_and_membership(self):
+        other = self.educational_fixture(permissions=("homework",))
+        self.message("0012345678")
+        with self.sessions.begin() as session:
+            student = Student(national_id="0000000000", full_name="دانش‌آموز دیگر", phone="", bale_user_id=26, chat_id=26)
+            session.add(student)
+            session.flush()
+            session.add(Enrollment(classroom_id=other, student_id=student.id))
+        self.callback(f"ed:hwnew:{self.class_id}", user=41)
+        self.message(f"تمرین\n{excel.today()[1]}\nپاسخ در یک پیام", user=41)
+        self.confirm_education(41)
+        with self.sessions() as session:
+            homework_id = session.scalar(select(Homework.id))
+        self.message(HOMEWORK_BUTTON)
+        self.assertIn("ریاضی | تمرین", self.button_texts(self.last_payload_for(25)))
+        self.callback(f"hw:open:{homework_id}", user=26)
+        self.assertIn("در کلاس‌های شما نیست", self.latest_text())
+        self.callback(f"hw:submit:{homework_id}", user=25)
+        self.message("پاسخ خصوصی دانش‌آموز")
+        self.confirm_education(25, prefix="hw")
+        self.callback(f"ed:submissions:{self.class_id}:{homework_id}:0", user=41)
+        self.assertIn("دانش آموز", self.button_texts(self.last_payload_for(41)))
+        self.callback(f"ed:submission:{self.class_id}:{homework_id}:{self.student_id}", user=41)
+        self.assertIn("پاسخ خصوصی دانش‌آموز", self.latest_text())
+        self.callback(f"ed:feedback:{self.class_id}:{homework_id}:{self.student_id}", user=41)
+        self.message("عالی بود", user=41)
+        self.confirm_education(41)
+        self.assertIn("بازخورد ثبت شد", self.last_payload_for(25)["text"])
+        self.callback(f"hw:open:{homework_id}", user=25)
+        self.assertIn("عالی بود", self.latest_text())
+        self.callback(f"hw:submit:{homework_id}", user=25)
+        self.assertIn("ارزیابی شده", self.latest_text())
+        with self.sessions() as session:
+            self.assertEqual(session.get(HomeworkSubmission, (homework_id, self.student_id)).reviewer_id, 41)
+
+    def test_education_family_requires_link_and_opt_in_and_rechecks_at_delivery(self):
+        other = self.educational_fixture(permissions=("family",))
+        owner = self.config.admin_id
+        with self.sessions.begin() as session:
+            sibling = Student(national_id="0000000000", full_name="همکلاسی", phone="")
+            outside = Student(national_id="0000000001", full_name="کلاس دیگر", phone="")
+            session.add_all([sibling, outside])
+            session.flush()
+            sibling_id, outside_id = sibling.id, outside.id
+            session.add_all([Enrollment(classroom_id=self.class_id, student_id=sibling_id),
+                             Enrollment(classroom_id=other, student_id=outside_id)])
+        for class_id, student_id, guardian_id in ((self.class_id, self.student_id, 50),
+                                                   (self.class_id, sibling_id, 50),
+                                                   (other, outside_id, 51), (self.class_id, sibling_id, 52)):
+            self.callback(f"ed:glink:{class_id}:{student_id}")
+            self.message(str(guardian_id), user=owner)
+            self.confirm_education()
+        self.message("/family", user=53)
+        self.assertIn("ثبت نشده", self.latest_text())
+        self.message("/family", user=50)
+        self.message("/family", user=51)
+        self.callback(f"ed:familymsg:{self.class_id}:0", user=41)
+        self.message("پیام گروهی کلاس", user=41)
+        self.assertIn("ارسال به 1 حساب", self.latest_text())
+        self.confirm_education(41)
+        while self.runner.deliver_one():
+            pass
+        self.assertEqual([payload["chat_id"] for _, payload in self.api.calls
+                          if payload.get("text", "").startswith("✉️ پیام آموزشی")], [50])
+        self.callback(f"ed:familymsg:{self.class_id}:{self.student_id}", user=41)
+        self.message("پیام فردی کلاس", user=41)
+        self.confirm_education(41)
+        self.message("/family_off", user=50)
+        while self.runner.deliver_one():
+            pass
+        with self.sessions() as session:
+            self.assertEqual(session.scalar(select(func.count()).select_from(GuardianLink)), 4)
+            self.assertEqual(session.scalar(select(func.count()).select_from(FamilyMessage)), 2)
+            messages = list(session.scalars(select(Outbox).where(Outbox.dedupe_key.startswith("edfamily:"))))
+            self.assertEqual([(item.dedupe_key.rsplit(":", 1)[-1], item.status) for item in messages],
+                             [("50", "sent"), ("50", "expired")])
 
     def coin_category(self, amount="۱۵"):
         self.callback("coins:new")
@@ -403,7 +590,7 @@ class BotTests(unittest.TestCase):
         self.callback("feature:contacts:0")
         self.assertIn(COINS_STUDENT_BUTTON, self.button_texts(self.last_payload_for(25)))
         self.callback("feature:coins:0")
-        remaining = ["🏫 کلاس‌های من", "📝 ثبت عدم حضور", "📅 جلسات من", REFRESH_BUTTON]
+        remaining = ["🏫 کلاس‌های من", "📝 ثبت عدم حضور", HOMEWORK_BUTTON, "📅 جلسات من", REFRESH_BUTTON]
         self.assertEqual(self.button_texts(self.last_payload_for(25)), remaining)
         self.message("🎁 تخفیف‌های من")
         self.assertIn("غیرفعال", self.latest_text())

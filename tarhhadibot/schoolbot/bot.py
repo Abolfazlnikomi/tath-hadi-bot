@@ -8,6 +8,8 @@ from sqlalchemy import func, select
 from . import excel
 from .api import BaleError
 from .coins import CoinsMixin
+from .education import EducationMixin
+from .education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, bound_student, mentor_active
 from .features import (
     COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, FEATURES, TEXT_FEATURES, callback_features, enabled, state_features,
 )
@@ -31,6 +33,7 @@ STUDENT_MENU = [
     ["📝 ثبت عدم حضور", "🎁 تخفیف‌های من"],
     ["☎️ راه‌های ارتباطی"],
     [COINS_STUDENT_BUTTON],
+    [HOMEWORK_BUTTON],
     ["📅 جلسات من", REFRESH_BUTTON],
 ]
 ADMIN_MENU = [
@@ -41,6 +44,7 @@ ADMIN_MENU = [
     ["👥 مدیریت ادمین‌ها", "🎁 نام بخش تخفیف/رکوردها"],
     ["☎️ راه‌های ارتباطی", "لغو"],
     [COINS_ADMIN_BUTTON],
+    [MENTOR_ADMIN, MENTOR_PANEL],
     ["📅 جلسات", REFRESH_BUTTON],
 ]
 
@@ -54,7 +58,7 @@ def reply(admin=False):
             "resize_keyboard": True}
 
 
-class Bot(MeetingsMixin, CoinsMixin):
+class Bot(MeetingsMixin, CoinsMixin, EducationMixin):
     def __init__(self, config, api):
         self.config = config
         self.api = api
@@ -66,7 +70,7 @@ class Bot(MeetingsMixin, CoinsMixin):
         if markup is None:
             student = session.scalar(select(Student).where(Student.chat_id == chat_id, Student.active.is_(True)))
             if student and not is_admin(session, student.bale_user_id, self.config.admin_id):
-                markup = self.menu(session)
+                markup = self.menu(session, user_id=student.bale_user_id)
         for offset in range(0, len(text), 3500):
             payload = {"chat_id": chat_id, "text": text[offset:offset + 3500]}
             if markup is not None and offset + 3500 >= len(text):
@@ -92,6 +96,8 @@ class Bot(MeetingsMixin, CoinsMixin):
 
     def menu(self, session, admin=False, user_id=None):
         markup = reply(admin)
+        if not admin and user_id is not None and mentor_active(session, user_id):
+            markup["keyboard"].append([{"text": MENTOR_PANEL}])
         markup["keyboard"] = [
             [button for button in row if enabled(session, TEXT_FEATURES.get(button["text"], ""))
              and (button["text"] != "👥 مدیریت ادمین‌ها" or user_id == self.config.admin_id)]
@@ -109,10 +115,9 @@ class Bot(MeetingsMixin, CoinsMixin):
     def refresh_student_menus(self, session):
         students = session.scalars(select(Student).where(Student.active.is_(True), Student.chat_id.is_not(None)))
         admin_keys = set(session.scalars(select(Setting.key).where(Setting.key.startswith("admin:"))))
-        markup = self.menu(session)
         for student in students:
             if student.bale_user_id != self.config.admin_id and f"admin:{student.bale_user_id}" not in admin_keys:
-                self.say(session, student.chat_id, "منوی شما به‌روز شد.", markup)
+                self.say(session, student.chat_id, "منوی شما به‌روز شد.", self.menu(session, user_id=student.bale_user_id))
 
     def admins_menu(self, session, chat_id, page=0):
         admins = list(session.scalars(select(Setting).where(Setting.key.startswith("admin:"))
@@ -176,6 +181,12 @@ class Bot(MeetingsMixin, CoinsMixin):
             data = callback.get("data")
             if not isinstance(data, str) or not data:
                 return
+            if data.startswith("ed:"):
+                self.education_callback(session, chat_id, user_id, state, admin, data)
+                return
+            if data.startswith("hw:"):
+                self.student_homework_callback(session, chat_id, user_id, state, data)
+                return
             if data.startswith(("mr:", "my:")):
                 self.registered_participant(session, chat_id, user_id, data)
                 return
@@ -203,6 +214,29 @@ class Bot(MeetingsMixin, CoinsMixin):
         if text == "/id":
             self.say(session, chat_id, f"شناسه عددی حساب شما: {user_id}")
             return
+        if text in ("/family", "/family_off"):
+            self.education_guardian_command(session, chat_id, user_id, text == "/family")
+            return
+        mentor = not admin and mentor_active(session, user_id)
+        if text == MENTOR_PANEL:
+            if admin or mentor:
+                self.education_classes(session, chat_id, user_id, state, admin)
+            else:
+                self.say(session, chat_id, "دسترسی به پنل آموزشی مجاز نیست.")
+            return
+        if text == MENTOR_ADMIN and admin:
+            self.education_callback(session, chat_id, user_id, state, admin, "ed:manage:0")
+            return
+        if text == HOMEWORK_BUTTON:
+            self.student_homework_callback(session, chat_id, user_id, state, "hw:list:0")
+            return
+        if mentor and (is_refresh(text) or text in ("/start", "/cancel", "لغو", "منوی اصلی")):
+            self.set_state(state)
+            markup = (self.menu(session, user_id=user_id) if bound_student(session, user_id, chat_id) is not None
+                      else {"keyboard": [[{"text": MENTOR_PANEL}, {"text": REFRESH_BUTTON}], [{"text": "لغو"}]],
+                            "resize_keyboard": True})
+            self.say(session, chat_id, "برای مشاهده کلاس‌ها «پنل آموزشی» را بزنید.", markup)
+            return
         if is_refresh(text):
             if not admin and session.scalar(select(Student.id).where(
                 Student.bale_user_id == user_id, Student.chat_id == chat_id, Student.active.is_(True),
@@ -222,9 +256,18 @@ class Bot(MeetingsMixin, CoinsMixin):
                 student = session.scalar(
                     select(Student).where(Student.bale_user_id == user_id, Student.active.is_(True)))
                 if student:
-                    self.home(session, chat_id, False)
+                    self.home(session, chat_id, False, user_id)
                 else:
                     self.say(session, chat_id, "لطفاً کد ملی ۱۰ رقمی خود را ارسال کنید.", {"remove_keyboard": True})
+            return
+        if state.data.get("mode", "").startswith("education_"):
+            self.education_message(session, chat_id, user_id, state, admin, text)
+            return
+        if state.data.get("mode", "").startswith("student_homework_"):
+            self.student_homework_message(session, chat_id, user_id, state, text)
+            return
+        if mentor and bound_student(session, user_id, chat_id) is None:
+            self.say(session, chat_id, "برای مشاهده کلاس‌ها «پنل آموزشی» را بزنید.")
             return
         if admin:
             self.admin_message(session, chat_id, user_id, state, message, text)
@@ -483,6 +526,7 @@ class Bot(MeetingsMixin, CoinsMixin):
             [(f"ثبت رکورد در {title}", f"record:{identifier}")],
             [("🪙 ثبت سکه", f"coins:categories:{identifier}:0"),
              ("📥 اکسل سکه‌ها", f"coins:report:{identifier}")],
+            [("🎓 پنل آموزشی کلاس", f"ed:class:{identifier}")],
             [("ارسال پیام به کلاس", f"broadcast:{identifier}")],
             [("حذف عضویت دانش‌آموز", f"remove:{identifier}")],
         ]
