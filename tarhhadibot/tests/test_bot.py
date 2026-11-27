@@ -12,9 +12,12 @@ from schoolbot import excel
 from schoolbot.api import BaleError
 from schoolbot.bot import REFRESH_BUTTON
 from schoolbot.config import Config
+from schoolbot.consultation_models import Consultation, ConsultationBooking, ConsultationSlot
+from schoolbot.consultations import parse_consultation_slots
 from schoolbot.education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, PERMISSIONS
 from schoolbot.education_models import (
-    AbsenceFollowup, FamilyMessage, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass, MentorRegistration, SessionReport,
+    AbsenceFollowup, FamilyMessage, GuardianAccount, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass,
+    MentorRegistration, SessionReport,
 )
 from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, REMINDER_BUTTON
 from schoolbot.parent_meeting_models import MeetingSection, ParentMeeting, ParentMeetingClass
@@ -119,6 +122,99 @@ class BotTests(unittest.TestCase):
     def current_nonce(self, user=None):
         with self.sessions() as session:
             return session.get(Conversation, self.config.admin_id if user is None else user).data["nonce"]
+
+    def test_consultation_slot_inputs(self):
+        now = utcnow()
+        day = local_time(now + timedelta(days=2)).split()[0]
+        slots = parse_consultation_slots(f"{day} ۱۷:۰۰-۱۸:۰۰ ۱۰", True, now)
+        self.assertEqual(6, len(slots))
+        self.assertEqual(timedelta(hours=1), slots[-1][1] - slots[0][0])
+        self.assertTrue(all(end - start == timedelta(minutes=10) for start, end in slots))
+        manual = parse_consultation_slots(f"{day} 18:00-18:25\n{day} 17:00-17:10", False, now)
+        self.assertEqual([10, 25], [(end - start).seconds // 60 for start, end in manual])
+        for text, automatic in (
+            (f"{day} 17:00-18:00 14", True),
+            (f"{day} 17:00-18:00 0", True),
+            (f"{day} 17:00-17:20\n{day} 17:10-17:25", False),
+            (f"{day} 18:00-17:00", False),
+            (f"{local_time(now - timedelta(days=1)).split()[0]} 17:00-18:00", False),
+        ):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                parse_consultation_slots(text, automatic, now)
+
+    def test_consultation_booking_and_scoped_excel(self):
+        owner = self.config.admin_id
+        bit = PERMISSIONS["consultation"][0]
+        with self.sessions.begin() as session:
+            other = Student(national_id="0012345679", full_name="خانواده دوم", phone="09123456780")
+            foreign = Student(national_id="0012345680", full_name="خانواده کلاس دیگر", phone="09123456781")
+            other_room = Classroom(title="علوم")
+            session.add_all([other, foreign, other_room, Mentor(user_id=71, name="مربی"),
+                             Mentor(user_id=72, name="مربی کلاس دیگر")])
+            session.add_all(GuardianAccount(user_id=guardian) for guardian in (50, 51, 52, 53))
+            session.flush()
+            session.add_all([
+                Enrollment(classroom_id=self.class_id, student_id=other.id),
+                Enrollment(classroom_id=other_room.id, student_id=foreign.id),
+                GuardianLink(student_id=self.student_id, guardian_id=50),
+                GuardianLink(student_id=self.student_id, guardian_id=51),
+                GuardianLink(student_id=other.id, guardian_id=52),
+                GuardianLink(student_id=foreign.id, guardian_id=53),
+                MentorClass(mentor_id=71, classroom_id=self.class_id, permissions=0),
+                MentorClass(mentor_id=72, classroom_id=other_room.id, permissions=bit),
+            ])
+        self.message("/consultation", user=owner)
+        self.assertIn("کلاس را انتخاب", self.latest_text())
+        self.callback(f"cs:new:{self.class_id}")
+        self.message("=عنوان مشاوره", user=owner)
+        self.message("گفت‌وگو درباره پیشرفت تحصیلی", user=owner)
+        self.callback(f"cs:input:auto:{self.current_nonce()}")
+        day = local_time(utcnow() + timedelta(days=2)).split()[0]
+        self.message(f"{day} 17:00-18:00 10", user=owner)
+        save = f"cs:save:{self.current_nonce()}"
+        self.callback(save)
+        self.callback(save)
+        with self.sessions() as session:
+            consultation_id = session.scalars(select(Consultation.id)).one()
+            slots = list(session.scalars(select(ConsultationSlot.id).order_by(ConsultationSlot.starts_at)))
+            self.assertEqual(6, len(slots))
+        for guardian in (50, 51, 52, 53):
+            self.message("/family", user=guardian)
+        self.callback(f"cf:slots:{consultation_id}:0", user=53)
+        self.assertIn("در دسترس نیست", self.latest_text())
+        for guardian in (50, 52):
+            self.callback(f"cf:pick:{consultation_id}:{slots[0]}", user=guardian)
+        self.callback(f"cf:book:{consultation_id}:{slots[0]}:{self.current_nonce(50)}", user=50)
+        self.assertIn("ثبت شد", self.latest_text())
+        self.callback(f"cf:book:{consultation_id}:{slots[0]}:{self.current_nonce(52)}", user=52)
+        self.assertIn("دیگر آزاد نیست", self.latest_text())
+        self.callback(f"cf:slots:{consultation_id}:0", user=52)
+        self.assertFalse(any("17:00" in label for label in self.button_texts(self.last_payload_for(52))))
+        self.callback(f"cf:pick:{consultation_id}:{slots[1]}", user=51)
+        self.assertIn("نوبت ثبت‌شده خانواده", self.latest_text())
+        with self.sessions() as session:
+            self.assertEqual(50, session.scalars(select(ConsultationBooking.guardian_id)).one())
+
+        export = f"cs:export:{consultation_id}"
+        self.callback(export, user=71)
+        self.assertIn("مجاز نیست", self.latest_text())
+        self.callback(f"ed:perm:71:{self.class_id}:{list(PERMISSIONS).index('consultation')}:1")
+        self.callback(export, user=72)
+        self.assertIn("مجاز نیست", self.latest_text())
+        self.callback(export, user=71)
+        self.callback(export)
+        with self.sessions() as session:
+            files = list(session.scalars(select(Outbox).where(Outbox.method == "sendDocument").order_by(Outbox.id)))
+            self.assertEqual([71, owner], [item.payload["chat_id"] for item in files])
+            book = load_workbook(BytesIO(base64.b64decode(files[0].payload["_file"]["content"])))
+            self.assertEqual("s", book.active["A2"].data_type)
+            self.assertEqual("=عنوان مشاوره", book.active["A2"].value)
+            self.assertEqual(("رزرو شده", "دانش آموز", "50"), tuple(cell.value for cell in book.active[2][3:6]))
+            self.assertEqual("آزاد", book.active["D3"].value)
+        self.callback(f"ed:perm:71:{self.class_id}:{list(PERMISSIONS).index('consultation')}:0")
+        while self.runner.deliver_one():
+            pass
+        self.assertEqual([owner], [payload["chat_id"] for method, payload in self.api.calls if method == "sendDocument"])
 
     def add_admin(self, user=26):
         self.callback("admin_add")

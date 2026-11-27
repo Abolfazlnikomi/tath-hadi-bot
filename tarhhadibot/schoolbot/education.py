@@ -12,7 +12,7 @@ from .education_admin import ADMIN_ROUTES, EducationAdminMixin
 from .education_attendance import ATTENDANCE_ROUTES, EducationAttendanceMixin
 from .education_homework import HOMEWORK_ROUTES, EducationHomeworkMixin
 from .education_models import FamilyMessage, GuardianAccount, GuardianLink, MentorClass, SessionReport
-from .features import enabled
+from .features import CONSULTATION_BUTTON, enabled
 from .models import Classroom, Outbox, Student
 
 
@@ -96,8 +96,10 @@ class EducationMixin(EducationAdminMixin, EducationAttendanceMixin, EducationHom
             return
         account.chat_id = chat_id if subscribe else None
         if subscribe:
-            self.education_say(session, chat_id, "دریافت پیام خانواده فعال شد.",
-                               [[("📅 جلسات والدین", "pf:list:0")]])
+            rows = [[("📅 جلسات والدین", "pf:list:0")]]
+            if enabled(session, "consultations"):
+                rows.append([(CONSULTATION_BUTTON, "cf:list:0")])
+            self.education_say(session, chat_id, "دریافت پیام خانواده فعال شد.", rows)
         else:
             self.say(session, chat_id, "دریافت پیام خانواده متوقف شد.")
 
@@ -181,8 +183,11 @@ class EducationMixin(EducationAdminMixin, EducationAttendanceMixin, EducationHom
                       "homework": "homework", "family": "family", "coins": "coins"}
             rows = [[(label, f"ed:{routes[key]}:{classroom_id}:0" if key != "coins" else f"coins:categories:{classroom_id}:0")]
                     for key, (_, label) in PERMISSIONS.items()
-                    if class_access(session, self.config.admin_id, user_id, classroom_id, key)
+                    if key in routes and class_access(session, self.config.admin_id, user_id, classroom_id, key)
                     and (key not in ("attendance", "coins") or enabled(session, key))]
+            if enabled(session, "consultations") and class_access(
+                    session, self.config.admin_id, user_id, classroom_id, "consultation"):
+                rows.append([(CONSULTATION_BUTTON, f"cs:list:{classroom_id}:0")])
             if admin:
                 rows.extend([[("مدیریت اولیا", f"ed:guardians:{classroom_id}:0")],
                              [("سوابق پیام خانواده", f"ed:familylog:{classroom_id}:0")]])

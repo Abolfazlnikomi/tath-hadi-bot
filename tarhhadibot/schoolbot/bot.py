@@ -8,11 +8,13 @@ from sqlalchemy import func, select
 from . import excel
 from .api import BaleError
 from .coins import CoinsMixin
+from .consultations import ConsultationsMixin
 from .education import EducationMixin
 from .education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, bound_student, mentor_active
+from .education_models import GuardianAccount
 from .features import (
-    COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, FEATURES, REMINDER_BUTTON, TEXT_FEATURES, callback_features, enabled,
-    state_features,
+    COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, CONSULTATION_BUTTON, FEATURES, REMINDER_BUTTON, TEXT_FEATURES,
+    callback_features, enabled, state_features,
 )
 from .meetings import MeetingsMixin
 from .mentor_registration import MentorRegistrationMixin
@@ -51,6 +53,7 @@ ADMIN_MENU = [
     [MENTOR_ADMIN, MENTOR_PANEL],
     ["📅 جلسات", REFRESH_BUTTON],
     [REMINDER_BUTTON],
+    [CONSULTATION_BUTTON],
 ]
 
 
@@ -63,7 +66,8 @@ def reply(admin=False):
             "resize_keyboard": True}
 
 
-class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, ParentMeetingsMixin, SmartRemindersMixin):
+class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, ParentMeetingsMixin, SmartRemindersMixin,
+          ConsultationsMixin):
     def __init__(self, config, api):
         self.config = config
         self.api = api
@@ -195,6 +199,12 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
             if data.startswith("pf:"):
                 self.parent_meeting_participant(session, chat_id, user_id, data)
                 return
+            if data.startswith("cf:"):
+                self.consultation_family(session, chat_id, user_id, state, data)
+                return
+            if data.startswith("cs:"):
+                self.consultation_staff(session, chat_id, user_id, state, data)
+                return
             if data.startswith("coins:") and (admin or mentor_active(session, user_id)):
                 self.coins_callback(session, chat_id, user_id, state, data)
                 return
@@ -233,6 +243,12 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
             return
         if text in ("/family", "/family_off"):
             self.education_guardian_command(session, chat_id, user_id, text == "/family")
+            return
+        if text in (CONSULTATION_BUTTON, "/consultation", "/family_consultations"):
+            if admin and text != "/family_consultations":
+                self.consultation_staff(session, chat_id, user_id, state, "cs:classes:0")
+            else:
+                self.consultation_family(session, chat_id, user_id, state, "cf:list:0")
             return
         if text in (PARENT_BUTTON, "/family_meetings"):
             if admin:
@@ -284,11 +300,16 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
                     select(Student).where(Student.bale_user_id == user_id, Student.active.is_(True)))
                 if student:
                     self.home(session, chat_id, False, user_id)
+                elif (guardian := session.get(GuardianAccount, user_id)) is not None and guardian.chat_id == chat_id:
+                    self.education_guardian_command(session, chat_id, user_id, True)
                 else:
                     self.say(session, chat_id, "لطفاً کد ملی ۱۰ رقمی خود را ارسال کنید.", {"remove_keyboard": True})
             return
         if state.data.get("mode", "").startswith("education_"):
             self.education_message(session, chat_id, user_id, state, admin, text)
+            return
+        if state.data.get("mode", "").startswith("consultation_"):
+            self.consultation_message(session, chat_id, user_id, state, text)
             return
         if state.data.get("mode") == "mentor_login":
             self.mentor_login(session, chat_id, user_id, state, text)

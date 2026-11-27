@@ -11,6 +11,7 @@ from .api import BaleAPI, BaleError
 from .bot import Bot
 from .coins import valid_coin_delivery
 from .config import Config
+from .consultations import valid_consultation_delivery
 from .education_access import valid_education_delivery
 from .meetings import schedule_reminders, valid_delivery
 from .models import Base, Conversation, Inbox, LoginThrottle, Outbox, Setting, utcnow
@@ -154,6 +155,7 @@ class Runner:
                     or (key.startswith("meeting:") and not valid_delivery(session, message, utcnow()))
                     or (key.startswith("coins:") and not valid_coin_delivery(session, message))
                     or (key.startswith("sr:") and not valid_reminder_delivery(session, message, utcnow(), self.config.admin_id))
+                    or (key.startswith("csreport:") and not valid_consultation_delivery(session, message, self.config.admin_id))
                     or (key.startswith(("edview:", "edfamily:", "edfeedback:"))
                         and not valid_education_delivery(session, message, self.config.admin_id))):
                 message.status = "expired"

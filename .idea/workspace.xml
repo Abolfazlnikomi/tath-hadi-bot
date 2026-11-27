@@ -3,10 +3,6 @@
   <component name="ChangeListManager">
     <list default="true" id="df18c4f6-24ab-44b1-ad50-7a1ea56a0574" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/bot.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/schoolbot/reminders.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/schoolbot/reminders.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/tarhhadibot/tests/test_bot.py" beforeDir="false" afterPath="$PROJECT_DIR$/tarhhadibot/tests/test_bot.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -28,7 +24,7 @@
     <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
     <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
     <property name="WebServerToolWindowFactoryState" value="false" />
-    <property name="last_opened_file_path" value="$PROJECT_DIR$" />
+    <property name="last_opened_file_path" value="$PROJECT_DIR$/../Moheban-R" />
   </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
@@ -44,7 +40,8 @@
       <workItem from="1795500674252" duration="3084000" />
       <workItem from="1795545797362" duration="2723000" />
       <workItem from="1795556204672" duration="1522000" />
-      <workItem from="1795634210781" duration="2768000" />
+      <workItem from="1795634210781" duration="3012000" />
+      <workItem from="1795723544434" duration="24000" />
     </task>
     <servers />
   </component>
