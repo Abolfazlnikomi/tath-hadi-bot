@@ -67,13 +67,17 @@ def guardian_students(user_id):
 def family_students(session, user_id):
     guardians, students, pending = {user_id}, set(), {user_id}
     while pending:
-        found = set(session.scalars(select(Student.id).join(GuardianLink, GuardianLink.student_id == Student.id).where(
-            GuardianLink.guardian_id.in_(pending), Student.active.is_(True),
-        ))) - students
+        linked = select(GuardianLink.student_id).where(GuardianLink.guardian_id.in_(pending))
+        found = dict(session.execute(select(Student.id, Student.bale_user_id).where(
+            Student.active.is_(True), Student.id.not_in(students),
+            or_(Student.id.in_(linked), Student.bale_user_id.in_(pending)),
+        )).all())
         if not found:
             break
         students.update(found)
-        pending = set(session.scalars(select(GuardianLink.guardian_id).where(GuardianLink.student_id.in_(found)))) - guardians
+        related = set(session.scalars(select(GuardianLink.guardian_id).where(GuardianLink.student_id.in_(found))))
+        related.update(account_id for account_id in found.values() if account_id is not None)
+        pending = related - guardians
         guardians.update(pending)
     return students
 
@@ -84,7 +88,7 @@ def family_reservation(session, consultation_id, user_id, students):
     )
     return session.scalar(select(ConsultationSlot).join(ConsultationBooking).where(
         ConsultationBooking.consultation_id == consultation_id,
-        or_(ConsultationBooking.guardian_id == user_id, ConsultationSlot.id.in_(claims)),
+        or_(ConsultationBooking.booked_by == user_id, ConsultationSlot.id.in_(claims)),
     ).order_by(ConsultationSlot.starts_at).limit(1))
 
 
@@ -96,7 +100,7 @@ def consultation_report(session, consultation):
     sheet.freeze_panes = "A2"
     for column, width in zip("ABCDEFG", (30, 25, 45, 20, 40, 22, 38)):
         sheet.column_dimensions[column].width = width
-    _append(sheet, ("عنوان مشاوره", "کلاس", "نوبت (تهران)", "وضعیت", "دانش‌آموزان", "شناسه حساب ولی", "زمان رزرو (تهران)"))
+    _append(sheet, ("عنوان مشاوره", "کلاس", "نوبت (تهران)", "وضعیت", "دانش‌آموزان", "شناسه حساب رزروکننده", "زمان رزرو (تهران)"))
     classroom = session.get(Classroom, consultation.classroom_id)
     rows = session.execute(select(ConsultationSlot, ConsultationBooking).outerjoin(ConsultationBooking).where(
         ConsultationSlot.consultation_id == consultation.id,
@@ -105,7 +109,7 @@ def consultation_report(session, consultation):
     for slot, booking in rows:
         _append(sheet, (consultation.title, classroom.title, slot_label(slot.starts_at, slot.ends_at),
                         "رزرو شده" if booking else "گذشته" if utc(slot.starts_at) <= now else "آزاد",
-                        booking.student_names if booking else "", str(booking.guardian_id) if booking else "",
+                        booking.student_names if booking else "", str(booking.booked_by) if booking else "",
                         jdatetime.datetime.fromgregorian(datetime=utc(booking.booked_at).astimezone(TEHRAN))
                         .strftime("%Y/%m/%d %H:%M") if booking else ""))
     sheet.auto_filter.ref = sheet.dimensions
@@ -262,15 +266,18 @@ class ConsultationsMixin:
             return
         account = session.get(GuardianAccount, user_id)
         guardian = account is not None and account.chat_id == chat_id
-        student = None if guardian else bound_student(session, user_id, chat_id)
+        student = bound_student(session, user_id, chat_id)
         if not guardian and student is None:
-            self.say(session, chat_id, "برای رزرو مشاوره، حساب ولی را با دستور /family فعال کنید.")
+            self.say(session, chat_id, "برای رزرو مشاوره، ابتدا با حساب دانش‌آموز وارد بات شوید.")
             return
         _, action, *args = data.split(":")
         now = utcnow()
-        classrooms = select(Enrollment.classroom_id).where(
-            Enrollment.student_id.in_(guardian_students(user_id)) if guardian else Enrollment.student_id == student.id,
-        )
+        eligible = []
+        if student is not None:
+            eligible.append(Enrollment.student_id == student.id)
+        if guardian:
+            eligible.append(Enrollment.student_id.in_(guardian_students(user_id)))
+        classrooms = select(Enrollment.classroom_id).where(or_(*eligible))
         consultations = select(Consultation).where(Consultation.classroom_id.in_(classrooms))
         back = ("بازگشت به مشاوره‌ها", "cf:list:0")
         if action in ("list", "slots") and state.data.get("mode") == "family_consultation_confirm":
@@ -292,10 +299,6 @@ class ConsultationsMixin:
             self.say(session, chat_id, "این مشاوره برای شما در دسترس نیست.")
             return
         detail = f"{consultation.title}\n{consultation.description}\n\n"
-        if not guardian:
-            self.say(session, chat_id, detail + "برای انتخاب و رزرو نوبت، یکی از اولیای ثبت‌شده باید با حساب خودش "
-                     "دستور /family را به بات بفرستد و «مشاوره» را انتخاب کند.", keyboard([[back]]))
-            return
         students = family_students(session, user_id)
         reserved = family_reservation(session, consultation.id, user_id, students)
         if reserved is not None:
@@ -338,7 +341,7 @@ class ConsultationsMixin:
         try:
             with session.begin_nested():
                 session.add(ConsultationBooking(slot_id=slot.id, consultation_id=consultation.id,
-                                                guardian_id=user_id, student_names=names))
+                                                booked_by=user_id, student_names=names))
                 session.flush()
                 session.add_all(ConsultationFamilyClaim(consultation_id=consultation.id, student_id=student_id,
                                                         slot_id=slot.id) for student_id in sorted(students))

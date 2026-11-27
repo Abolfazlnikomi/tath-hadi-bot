@@ -11,6 +11,7 @@ from .api import BaleAPI, BaleError
 from .bot import Bot
 from .coins import valid_coin_delivery
 from .config import Config
+from .consultation_models import migrate_consultation_bookings
 from .consultations import valid_consultation_delivery
 from .education_access import valid_education_delivery
 from .meetings import schedule_reminders, valid_delivery
@@ -52,6 +53,7 @@ class Runner:
                 raise RuntimeError("یک نمونه دیگر ربات به این پایگاه داده متصل است.")
         with self.engine.begin() as connection:
             Base.metadata.create_all(connection)
+            migrate_consultation_bookings(connection)
             existing = {column["name"] for column in inspect(connection).get_columns("classrooms")}
             for column in ("instructor", "location", "schedule"):
                 if column not in existing:

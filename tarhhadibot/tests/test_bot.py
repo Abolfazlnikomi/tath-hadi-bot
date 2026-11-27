@@ -12,7 +12,7 @@ from schoolbot import excel
 from schoolbot.api import BaleError
 from schoolbot.bot import REFRESH_BUTTON
 from schoolbot.config import Config
-from schoolbot.consultation_models import Consultation, ConsultationBooking, ConsultationSlot
+from schoolbot.consultation_models import Consultation, ConsultationBooking, ConsultationFamilyClaim, ConsultationSlot
 from schoolbot.consultations import parse_consultation_slots
 from schoolbot.education_access import HOMEWORK_BUTTON, MENTOR_ADMIN, MENTOR_PANEL, PERMISSIONS
 from schoolbot.education_models import (
@@ -142,6 +142,55 @@ class BotTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_consultation_slots(text, automatic, now)
 
+    def test_consultation_upgrade_preserves_legacy_bookings(self):
+        engine = create_engine("sqlite+pysqlite:///:memory:")
+        self.addCleanup(engine.dispose)
+        runner = Runner(self.config, self.api, engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            connection.exec_driver_sql("""
+                CREATE TABLE consultation_bookings (
+                    slot_id INTEGER PRIMARY KEY REFERENCES consultation_slots(id),
+                    consultation_id INTEGER NOT NULL REFERENCES consultations(id),
+                    guardian_id BIGINT NOT NULL REFERENCES guardian_accounts(user_id),
+                    student_names TEXT NOT NULL,
+                    booked_at DATETIME NOT NULL,
+                    UNIQUE (consultation_id, guardian_id)
+                )
+            """)
+            Base.metadata.create_all(connection)
+        with runner.sessions.begin() as session:
+            student = Student(national_id="0012345678", full_name="دانش‌آموز", phone="09123456789")
+            classroom = Classroom(title="ریاضی")
+            session.add_all([student, classroom, GuardianAccount(user_id=50)])
+            session.flush()
+            consultation = Consultation(classroom_id=classroom.id, title="مشاوره", description="توضیحات")
+            session.add(consultation)
+            session.flush()
+            slot = ConsultationSlot(consultation_id=consultation.id, starts_at=utcnow(), ends_at=utcnow() + timedelta(hours=1))
+            session.add(slot)
+            session.flush()
+            student_id, consultation_id, slot_id = student.id, consultation.id, slot.id
+            session.connection().exec_driver_sql(
+                "INSERT INTO consultation_bookings VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+                (slot_id, consultation_id, 50, student.full_name),
+            )
+            session.add(ConsultationFamilyClaim(consultation_id=consultation_id, student_id=student_id, slot_id=slot_id))
+
+        runner.initialize()
+        runner.initialize()
+        with runner.sessions.begin() as session:
+            booking = session.get(ConsultationBooking, slot_id)
+            self.assertEqual((50, "دانش‌آموز"), (booking.booked_by, booking.student_names))
+            self.assertEqual(slot_id, session.get(ConsultationFamilyClaim, (consultation_id, student_id)).slot_id)
+            self.assertEqual([], session.connection().exec_driver_sql("PRAGMA foreign_key_check").all())
+            extra = ConsultationSlot(consultation_id=consultation_id, starts_at=utcnow() + timedelta(hours=1),
+                                     ends_at=utcnow() + timedelta(hours=2))
+            session.add(extra)
+            session.flush()
+            session.add(ConsultationBooking(slot_id=extra.id, consultation_id=consultation_id, booked_by=54,
+                                            student_names="رزرو جدید"))
+
     def test_consultation_student_menu_and_feature_toggle(self):
         owner, student_user = self.config.admin_id, 54
         now = utcnow()
@@ -173,24 +222,33 @@ class BotTests(unittest.TestCase):
         self.assertEqual(["مشاوره تحصیلی | ریاضی"], self.button_texts(self.last_payload_for(student_user)))
         self.callback(f"cf:slots:{other_id}:0", user=student_user)
         self.assertIn("در دسترس نیست", self.latest_text())
-        for callback in (f"cf:slots:{own_id}:0", f"cf:pick:{own_id}:{slot_id}",
-                         f"cf:book:{own_id}:{slot_id}:invalid"):
-            self.callback(callback, user=student_user)
-            self.assertIn("بررسی پیشرفت", self.latest_text())
-            self.assertIn("/family", self.latest_text())
+        self.callback(f"cf:slots:{own_id}:0", user=student_user)
+        self.assertIn("بررسی پیشرفت", self.latest_text())
+        self.assertIn("نوبت‌های آزاد", self.latest_text())
+        self.callback(f"cf:pick:{own_id}:{slot_id}", user=student_user + 1)
+        self.assertIn("ابتدا با حساب دانش‌آموز", self.latest_text())
+        self.callback(f"cf:pick:{own_id}:{slot_id}", user=student_user)
+        confirmation = f"cf:book:{own_id}:{slot_id}:{self.current_nonce(student_user)}"
         self.callback("feature:consultations:0")
         self.assertNotIn(CONSULTATION_BUTTON, self.button_texts(self.last_payload_for(student_user)))
-        self.callback(f"cf:slots:{own_id}:0", user=student_user)
+        self.callback(confirmation, user=student_user)
         self.assertIn("غیرفعال", self.latest_text())
+        with self.sessions() as session:
+            self.assertIsNone(session.get(ConsultationBooking, slot_id))
         self.callback("feature:consultations:1")
         self.assertIn(CONSULTATION_BUTTON, self.button_texts(self.last_payload_for(student_user)))
+        self.callback(confirmation, user=student_user)
+        self.assertIn("ثبت شد", self.latest_text())
         with self.sessions() as session:
-            self.assertIsNone(session.scalar(select(ConsultationBooking.slot_id)))
+            self.assertIsNone(session.get(GuardianAccount, student_user))
+            self.assertEqual(student_user, session.get(ConsultationBooking, slot_id).booked_by)
 
     def test_consultation_booking_and_scoped_excel(self):
         owner = self.config.admin_id
         bit = PERMISSIONS["consultation"][0]
         with self.sessions.begin() as session:
+            student = session.get(Student, self.student_id)
+            student.bale_user_id = student.chat_id = 54
             other = Student(national_id="0012345679", full_name="خانواده دوم", phone="09123456780")
             foreign = Student(national_id="0012345680", full_name="خانواده کلاس دیگر", phone="09123456781")
             other_room = Classroom(title="علوم")
@@ -227,9 +285,9 @@ class BotTests(unittest.TestCase):
             self.message("/family", user=guardian)
         self.callback(f"cf:slots:{consultation_id}:0", user=53)
         self.assertIn("در دسترس نیست", self.latest_text())
-        for guardian in (50, 52):
-            self.callback(f"cf:pick:{consultation_id}:{slots[0]}", user=guardian)
-        self.callback(f"cf:book:{consultation_id}:{slots[0]}:{self.current_nonce(50)}", user=50)
+        for account in (54, 52):
+            self.callback(f"cf:pick:{consultation_id}:{slots[0]}", user=account)
+        self.callback(f"cf:book:{consultation_id}:{slots[0]}:{self.current_nonce(54)}", user=54)
         self.assertIn("ثبت شد", self.latest_text())
         self.callback(f"cf:book:{consultation_id}:{slots[0]}:{self.current_nonce(52)}", user=52)
         self.assertIn("دیگر آزاد نیست", self.latest_text())
@@ -238,7 +296,7 @@ class BotTests(unittest.TestCase):
         self.callback(f"cf:pick:{consultation_id}:{slots[1]}", user=51)
         self.assertIn("نوبت ثبت‌شده خانواده", self.latest_text())
         with self.sessions() as session:
-            self.assertEqual(50, session.scalars(select(ConsultationBooking.guardian_id)).one())
+            self.assertEqual(54, session.scalars(select(ConsultationBooking.booked_by)).one())
 
         export = f"cs:export:{consultation_id}"
         self.callback(export, user=71)
@@ -254,7 +312,7 @@ class BotTests(unittest.TestCase):
             book = load_workbook(BytesIO(base64.b64decode(files[0].payload["_file"]["content"])))
             self.assertEqual("s", book.active["A2"].data_type)
             self.assertEqual("=عنوان مشاوره", book.active["A2"].value)
-            self.assertEqual(("رزرو شده", "دانش آموز", "50"), tuple(cell.value for cell in book.active[2][3:6]))
+            self.assertEqual(("رزرو شده", "دانش آموز", "54"), tuple(cell.value for cell in book.active[2][3:6]))
             self.assertEqual("آزاد", book.active["D3"].value)
         self.callback(f"ed:perm:71:{self.class_id}:{list(PERMISSIONS).index('consultation')}:0")
         while self.runner.deliver_one():
