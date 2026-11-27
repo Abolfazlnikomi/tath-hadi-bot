@@ -9,6 +9,7 @@ CONSULTATION_BUTTON = "🗓 مشاوره"
 
 FEATURES = {
     "students": "مدیریت و بارگذاری کاربران",
+    "consultations": "مشاوره",
     "attendance": "حضور و غیاب",
     "manual_attendance": "ثبت حضور و غیاب بدون اکسل",
     "absence": "اطلاع‌رسانی عدم حضور",
@@ -19,7 +20,6 @@ FEATURES = {
     "meetings": "جلسات و یادآوری",
     "coins": "امتیازات و سکه‌های هادی",
     "reminders": "یادآوری هوشمند",
-    "consultations": "مشاوره",
 }
 
 TEXT_FEATURES = {

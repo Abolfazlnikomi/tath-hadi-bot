@@ -40,6 +40,7 @@ STUDENT_MENU = [
     ["☎️ راه‌های ارتباطی"],
     [COINS_STUDENT_BUTTON],
     [HOMEWORK_BUTTON],
+    [CONSULTATION_BUTTON],
     ["📅 جلسات من", REFRESH_BUTTON],
 ]
 ADMIN_MENU = [
@@ -922,7 +923,7 @@ class Bot(MeetingsMixin, CoinsMixin, EducationMixin, MentorRegistrationMixin, Pa
             self.audit(session, user_id, "update_feature", feature=parts[1], enabled=parts[2] == "1")
             self.set_state(state)
             session.flush()
-            if parts[1] in ("attendance", "discounts", "contacts", "coins"):
+            if parts[1] in ("attendance", "discounts", "contacts", "coins", "consultations"):
                 self.refresh_student_menus(session)
             self.feature_menu(session, chat_id)
             self.home(session, chat_id, True, user_id)

@@ -19,7 +19,7 @@ from schoolbot.education_models import (
     AbsenceFollowup, FamilyMessage, GuardianAccount, GuardianLink, Homework, HomeworkSubmission, Mentor, MentorClass,
     MentorRegistration, SessionReport,
 )
-from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, REMINDER_BUTTON
+from schoolbot.features import COINS_ADMIN_BUTTON, COINS_STUDENT_BUTTON, CONSULTATION_BUTTON, REMINDER_BUTTON
 from schoolbot.parent_meeting_models import MeetingSection, ParentMeeting, ParentMeetingClass
 from schoolbot.parent_meetings import local_time
 from schoolbot.reminders import PHOTO_LIMIT, SmartReminder
@@ -141,6 +141,51 @@ class BotTests(unittest.TestCase):
         ):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 parse_consultation_slots(text, automatic, now)
+
+    def test_consultation_student_menu_and_feature_toggle(self):
+        owner, student_user = self.config.admin_id, 54
+        now = utcnow()
+        with self.sessions.begin() as session:
+            student = session.get(Student, self.student_id)
+            student.bale_user_id = student.chat_id = student_user
+            other_room = Classroom(title="علوم")
+            session.add(other_room)
+            session.flush()
+            own = Consultation(classroom_id=self.class_id, title="مشاوره تحصیلی", description="بررسی پیشرفت")
+            other = Consultation(classroom_id=other_room.id, title="مشاوره کلاس دیگر", description="خارج از کلاس")
+            session.add_all([own, other])
+            session.flush()
+            own_id, other_id = own.id, other.id
+            own_slot = ConsultationSlot(consultation_id=own_id, starts_at=now + timedelta(days=1),
+                                        ends_at=now + timedelta(days=1, minutes=10))
+            session.add_all([own_slot, ConsultationSlot(consultation_id=other_id, starts_at=now + timedelta(days=1),
+                                                       ends_at=now + timedelta(days=1, minutes=10))])
+            session.flush()
+            slot_id = own_slot.id
+
+        self.message("⚙️ امکانات بات", user=owner)
+        menu = self.last_payload_for(owner)["reply_markup"]["inline_keyboard"]
+        self.assertIn({"text": "✅ فعال | مشاوره", "callback_data": "feature:consultations:0"},
+                      [button for row in menu for button in row])
+        self.message("/refresh", user=student_user)
+        self.assertIn(CONSULTATION_BUTTON, self.button_texts(self.last_payload_for(student_user)))
+        self.message(CONSULTATION_BUTTON, user=student_user)
+        self.assertEqual(["مشاوره تحصیلی | ریاضی"], self.button_texts(self.last_payload_for(student_user)))
+        self.callback(f"cf:slots:{other_id}:0", user=student_user)
+        self.assertIn("در دسترس نیست", self.latest_text())
+        for callback in (f"cf:slots:{own_id}:0", f"cf:pick:{own_id}:{slot_id}",
+                         f"cf:book:{own_id}:{slot_id}:invalid"):
+            self.callback(callback, user=student_user)
+            self.assertIn("بررسی پیشرفت", self.latest_text())
+            self.assertIn("/family", self.latest_text())
+        self.callback("feature:consultations:0")
+        self.assertNotIn(CONSULTATION_BUTTON, self.button_texts(self.last_payload_for(student_user)))
+        self.callback(f"cf:slots:{own_id}:0", user=student_user)
+        self.assertIn("غیرفعال", self.latest_text())
+        self.callback("feature:consultations:1")
+        self.assertIn(CONSULTATION_BUTTON, self.button_texts(self.last_payload_for(student_user)))
+        with self.sessions() as session:
+            self.assertIsNone(session.scalar(select(ConsultationBooking.slot_id)))
 
     def test_consultation_booking_and_scoped_excel(self):
         owner = self.config.admin_id
@@ -875,7 +920,8 @@ class BotTests(unittest.TestCase):
         self.callback("feature:contacts:0")
         self.assertIn(COINS_STUDENT_BUTTON, self.button_texts(self.last_payload_for(25)))
         self.callback("feature:coins:0")
-        remaining = ["🏫 کلاس‌های من", "📝 ثبت عدم حضور", HOMEWORK_BUTTON, "📅 جلسات من", REFRESH_BUTTON]
+        remaining = ["🏫 کلاس‌های من", "📝 ثبت عدم حضور", HOMEWORK_BUTTON, CONSULTATION_BUTTON,
+                     "📅 جلسات من", REFRESH_BUTTON]
         self.assertEqual(self.button_texts(self.last_payload_for(25)), remaining)
         self.message("🎁 تخفیف‌های من")
         self.assertIn("غیرفعال", self.latest_text())

@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from . import excel
 from .coins import _append
 from .consultation_models import Consultation, ConsultationBooking, ConsultationFamilyClaim, ConsultationSlot
-from .education_access import ID_MAX, class_access, identifiers
+from .education_access import ID_MAX, bound_student, class_access, identifiers
 from .education_models import GuardianAccount, GuardianLink
 from .features import CONSULTATION_BUTTON, enabled
 from .meetings import DAYS, TEHRAN, keyboard, parse_start, utc
@@ -261,12 +261,16 @@ class ConsultationsMixin:
         if not self.allow(session, chat_id, ["consultations"]):
             return
         account = session.get(GuardianAccount, user_id)
-        if account is None or account.chat_id != chat_id:
+        guardian = account is not None and account.chat_id == chat_id
+        student = None if guardian else bound_student(session, user_id, chat_id)
+        if not guardian and student is None:
             self.say(session, chat_id, "برای رزرو مشاوره، حساب ولی را با دستور /family فعال کنید.")
             return
         _, action, *args = data.split(":")
         now = utcnow()
-        classrooms = select(Enrollment.classroom_id).where(Enrollment.student_id.in_(guardian_students(user_id)))
+        classrooms = select(Enrollment.classroom_id).where(
+            Enrollment.student_id.in_(guardian_students(user_id)) if guardian else Enrollment.student_id == student.id,
+        )
         consultations = select(Consultation).where(Consultation.classroom_id.in_(classrooms))
         back = ("بازگشت به مشاوره‌ها", "cf:list:0")
         if action in ("list", "slots") and state.data.get("mode") == "family_consultation_confirm":
@@ -287,9 +291,13 @@ class ConsultationsMixin:
         if consultation is None:
             self.say(session, chat_id, "این مشاوره برای شما در دسترس نیست.")
             return
+        detail = f"{consultation.title}\n{consultation.description}\n\n"
+        if not guardian:
+            self.say(session, chat_id, detail + "برای انتخاب و رزرو نوبت، یکی از اولیای ثبت‌شده باید با حساب خودش "
+                     "دستور /family را به بات بفرستد و «مشاوره» را انتخاب کند.", keyboard([[back]]))
+            return
         students = family_students(session, user_id)
         reserved = family_reservation(session, consultation.id, user_id, students)
-        detail = f"{consultation.title}\n{consultation.description}\n\n"
         if reserved is not None:
             self.say(session, chat_id, detail + "✅ نوبت ثبت‌شده خانواده:\n"
                      + slot_label(reserved.starts_at, reserved.ends_at), keyboard([[back]]))
